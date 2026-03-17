@@ -168,10 +168,6 @@ function Condition.new(closure, status, index, value, type)
         end
     end)
     
-    if byType then
-        instance.Identifiers.ByType.Visible = false
-    end 
-    
     identifiers.ByType.Visible = type ~= nil
     identifiers.Status.Image = (status == "Ignore" and icons.ignore) or icons.block
     identifiers.Status.Border.Image = identifiers.Status.Image
@@ -194,7 +190,7 @@ function Condition.toggle(condition)
     local blockedArgs = closure.BlockedArgs[index]
     local argStatus = (condition.Status == "Ignore" and ignoredArgs) or blockedArgs
 
-    if value then
+    if value ~= nil then
         argStatus.values[value] = condition.Enabled or nil
     else
         argStatus.types[condition.Type] = condition.Enabled or nil
@@ -205,7 +201,7 @@ function Condition.remove(condition)
     local branch = condition.Branch
     condition.Button:Remove()
 
-    if condition.Value then
+    if condition.Value ~= nil then
         branch.values[condition.Value] = nil
     else
         branch.types[condition.Type] = nil

@@ -6,7 +6,7 @@ local Methods = import("modules/RemoteSpy")
 local ClosureSpy = import("modules/ClosureSpy")
 local Closure = import("objects/Closure")
 
-if not hasMethods(Methods.RequiredMethods) then
+if not hasMethods(Methods.RequiredMethods) or not Methods.IsSupported then
     return RemoteSpy
 end
 
@@ -61,6 +61,7 @@ local icons = {
     ignore = "rbxassetid://4842578510",
     unignore = "rbxassetid://4842578818",
     RemoteEvent = "rbxassetid://4229806545",
+    UnreliableRemoteEvent = "rbxassetid://4229806545",
     RemoteFunction = "rbxassetid://4229810474",
     BindableEvent = "rbxassetid://4229809371",
     BindableFunction = "rbxassetid://4229807624"
@@ -182,10 +183,6 @@ function Condition.new(remote, status, index, value, type)
         end
     end)
     
-    if byType then
-        instance.Identifiers.ByType.Visible = false
-    end 
-    
     identifiers.ByType.Visible = type ~= nil
     identifiers.Status.Image = (status == "Ignore" and icons.ignore) or icons.block
     identifiers.Status.Border.Image = identifiers.Status.Image
@@ -208,7 +205,7 @@ function Condition.toggle(condition)
     local blockedArgs = remote.BlockedArgs[index]
     local argStatus = (condition.Status == "Ignore" and ignoredArgs) or blockedArgs
 
-    if value then
+    if value ~= nil then
         argStatus.values[value] = condition.Enabled or nil
     else
         argStatus.types[condition.Type] = condition.Enabled or nil
@@ -219,7 +216,7 @@ function Condition.remove(condition)
     local branch = condition.Branch
     condition.Button:Remove()
 
-    if condition.Value then
+    if condition.Value ~= nil then
         branch.values[condition.Value] = nil
     else
         branch.types[condition.Type] = nil
@@ -366,18 +363,14 @@ end
 
 local function createArg(instance, index, value)
     local arg = Assets.RemoteArg:Clone()
-    local valueType = type(value)
+    local valueType = typeof(value)
 
-    arg.Icon.Image = oh.Constants.Types[valueType]
+    arg.Icon.Image = oh.Constants.Types[valueType] or oh.Constants.Types["userdata"]
     arg.Index.Text = index
     
-    if valueType == "table" then
-        arg.Label.Text = toString(value)
-    else
-        arg.Label.Text = dataToString(value)
-    end
+    arg.Label.Text = dataToString(value)
     
-    arg.Label.TextColor3 = oh.Constants.Syntax[valueType]
+    arg.Label.TextColor3 = oh.Constants.Syntax[valueType] or oh.Constants.Syntax["userdata"]
     arg.Name = tostring(index)
     arg.Parent = instance.Contents
 
@@ -434,11 +427,11 @@ function Log.adjust(log)
     local logIcon = logInstance.Icon
 
     local callWidth = TextService:GetTextSize(logInstance.Calls.Text, 18, "SourceSans", constants.textWidth).X + 10
-    local iconPosition = callWidth - (((remoteClassName == "RemoteEvent" or remoteClassName == "BindableEvent") and 4) or 0)
+    local iconPosition = callWidth - (((remoteClassName == "RemoteEvent" or remoteClassName == "UnreliableRemoteEvent" or remoteClassName == "BindableEvent") and 4) or 0)
     local labelWidth = iconPosition + 21
 
     logInstance.Calls.Size = UDim2.new(0, callWidth, 1, 0)
-    logIcon.Position = UDim2.new(0, iconPosition, 0.5, (remoteClassName == "RemoteEvent" and -9) or -7)
+    logIcon.Position = UDim2.new(0, iconPosition, 0.5, ((remoteClassName == "RemoteEvent" or remoteClassName == "UnreliableRemoteEvent") and -9) or -7)
     logInstance.Label.Position = UDim2.new(0, labelWidth, 0, 0)
     logInstance.Label.Size = UDim2.new(1, -labelWidth, 1, 0)
 end
@@ -749,12 +742,16 @@ ignoreContextSelected:SetCallback(function()
     for _i, log in pairs(selected.logs) do
         local remote = log.Remote
 
-        remote:Ignore()
+        if not remote.Ignored then
+            remote:Ignore()
+        end
 
         if remote.Blocked then
             log:PlayBlock()
         elseif remote.Ignored then
             log:PlayIgnore()
+        else
+            log:PlayNormal()
         end
     end
 
@@ -783,7 +780,7 @@ blockContextSelected:SetCallback(function()
     for _i, log in pairs(selected.logs) do
         local remote = log.Remote
 
-        if remote.Blocked then
+        if not remote.Blocked then
             remote:Block()
         end
 
@@ -791,6 +788,8 @@ blockContextSelected:SetCallback(function()
             log:PlayBlock()
         elseif remote.Ignored then
             log:PlayIgnore()
+        else
+            log:PlayNormal()
         end
     end
 
@@ -837,7 +836,7 @@ scriptContext:SetCallback(function()
     local remotePath = getInstancePath(selectedRemote)
     local method
 
-    if remoteClassName == "RemoteEvent" then
+    if remoteClassName == "RemoteEvent" or remoteClassName == "UnreliableRemoteEvent" then
         method = "FireServer"
     elseif remoteClassName == "RemoteFunction" then
         method = "InvokeServer"
@@ -858,19 +857,9 @@ scriptContext:SetCallback(function()
 
         for i = 1, #selectedArgs do
             local v = selectedArgs[i]
-            local valueType = type(v)
             local robloxValueType = typeof(v)
             local variableName = robloxValueType:sub(1, 1):upper() .. robloxValueType:sub(2)
-
-            if valueType == "userdata" or valueType == "vector" then
-                v = (typeof(v) == "Instance" and getInstancePath(v)) or userdataValue(v)
-            elseif valueType == "table" then
-                v = tableToString(v)
-            elseif valueType == "string" then
-                v = dataToString(v)
-            else
-                v = toString(v)
-            end
+            v = dataToString(v)
 
             script = script .. ("local oh%s%d = %s\n"):format(variableName, i, v) 
             args = args .. ("oh%s%d, "):format(variableName, i)
@@ -884,6 +873,10 @@ scriptContext:SetCallback(function()
 end)
 
 callingScriptContext:SetCallback(function()
+    if typeof(selected.callingScript) ~= "Instance" then
+        return
+    end
+
     local oldStatus = oh.getStatus()
 
     oh.setStatus("Copying " .. selected.callingScript.Name .. "'s path")
@@ -911,7 +904,7 @@ repeatCallContext:SetCallback(function()
     local remoteClassName = remoteInstance.ClassName
     local method 
 
-    if remoteClassName == "RemoteEvent" then
+    if remoteClassName == "RemoteEvent" or remoteClassName == "UnreliableRemoteEvent" then
         method = "FireServer"
     elseif remoteClassName == "RemoteFunction" then
         method = "InvokeServer"

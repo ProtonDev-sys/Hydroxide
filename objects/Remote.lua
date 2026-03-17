@@ -10,7 +10,11 @@ function Remote.new(instance)
     remote.Ignored = false
     remote.Clear = Remote.clear
     remote.Block = Remote.block
+    remote.Unblock = Remote.unblock
+    remote.SetBlocked = Remote.setBlocked
     remote.Ignore = Remote.ignore
+    remote.Unignore = Remote.unignore
+    remote.SetIgnored = Remote.setIgnored
     remote.BlockedArgs = {}
     remote.IgnoredArgs = {}
     remote.BlockArg = Remote.blockArg
@@ -28,12 +32,28 @@ function Remote.clear(remote)
     remote.Logs = {}
 end
 
-function Remote.block(remote)
-    remote.Blocked = not remote.Blocked
+function Remote.setBlocked(remote, blocked)
+    remote.Blocked = blocked and true or false
 end
 
-function Remote.ignore(remote)  
-    remote.Ignored = not remote.Ignored
+function Remote.block(remote)
+    remote:SetBlocked(not remote.Blocked)
+end
+
+function Remote.unblock(remote)
+    remote:SetBlocked(false)
+end
+
+function Remote.setIgnored(remote, ignored)
+    remote.Ignored = ignored and true or false
+end
+
+function Remote.ignore(remote)
+    remote:SetIgnored(not remote.Ignored)
+end
+
+function Remote.unignore(remote)
+    remote:SetIgnored(false)
 end
 
 function Remote.blockArg(remote, index, value, byType)
@@ -57,21 +77,21 @@ end
 
 function Remote.ignoreArg(remote, index, value, byType)
     local ignoredArgs = remote.IgnoredArgs
-    local indexIgnore = ignoredArgs[index]
+    local ignoredIndex = ignoredArgs[index]
 
-    if not indexIgnore then
-        indexIgnore = {
+    if not ignoredIndex then
+        ignoredIndex = {
             types = {},
             values = {}
         }
 
-        ignoredArgs[index] = indexIgnore
+        ignoredArgs[index] = ignoredIndex
     end
 
     if byType then
-        indexIgnore.types[value] = true
+        ignoredIndex.types[value] = true
     else
-        indexIgnore.values[value] = true
+        ignoredIndex.values[value] = true
     end
 end
 
@@ -80,11 +100,13 @@ function Remote.areArgsBlocked(remote, args)
 
     for index, value in pairs(args) do
         local indexBlock = blockedArgs[index]
-        
-        if indexBlock and ( indexBlock.types[typeof(value)] or indexBlock.values[value] ~= nil ) then
+
+        if indexBlock and (indexBlock.types[typeof(value)] or indexBlock.values[value] ~= nil) then
             return true
         end
     end
+
+    return false
 end
 
 function Remote.areArgsIgnored(remote, args)
@@ -93,22 +115,27 @@ function Remote.areArgsIgnored(remote, args)
     for index, value in pairs(args) do
         local indexIgnore = ignoredArgs[index]
 
-        if indexIgnore and ( indexIgnore.types[typeof(value)] or indexIgnore.values[value] ~= nil ) then
+        if indexIgnore and (indexIgnore.types[typeof(value)] or indexIgnore.values[value] ~= nil) then
             return true
         end
     end
+
+    return false
 end
 
-function Remote.incrementCalls(remote, vargs)
+function Remote.incrementCalls(remote, call)
     remote.Calls = remote.Calls + 1
-    table.insert(remote.Logs, vargs)
+    table.insert(remote.Logs, call)
 end
 
-function Remote.decrementCalls(remote, vargs)
+function Remote.decrementCalls(remote, call)
     local logs = remote.Logs
+    local index = table.find(logs, call)
 
-    remote.Calls = remote.Calls - 1
-    table.remove(logs, table.find(logs, vargs))
+    if index then
+        table.remove(logs, index)
+        remote.Calls = math.max(0, remote.Calls - 1)
+    end
 end
 
 return Remote

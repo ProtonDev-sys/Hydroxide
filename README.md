@@ -1,15 +1,37 @@
 ## Script
 ```lua
-local owner = "Upbolt"
+local owner = "ProtonDev-sys"
 local branch = "revision"
 
+local function httpGet(url)
+    if request then
+        local response = request({ Url = url, Method = "GET" })
+        if response and response.Success then
+            return response.Body
+        end
+    end
+
+    local ok, result = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    if ok then
+        return result
+    end
+
+    return game:HttpGetAsync(url)
+end
+
 local function webImport(file)
-    return loadstring(game:HttpGetAsync(("https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"):format(owner, branch, file)), file .. '.lua')()
+    return loadstring(httpGet(("https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"):format(owner, branch, file)), file .. ".lua")()
 end
 
 webImport("init")
 webImport("ui/main")
 ```
+
+## Compatibility
+Volt's documented function surface is the canonical target for this fork. Volt-specific hooks such as `oth` are preferred when present, legacy alias paths are kept for fallback executors, and `__namecall` interception is only used as a fallback when direct hooks are unavailable.
 
 # Hydroxide
 <i>Lua runtime introspection and network capturing tool for games on the Roblox engine.</i>

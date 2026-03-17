@@ -1,48 +1,64 @@
 local methods = {}
 
-local function tableToString(data, root, indents)
-    local dataType = type(data)
+local function isBuffer(value)
+    return type(value) == "buffer" or typeof(value) == "buffer"
+end
 
-    if dataType == "userdata" then
-        return (typeof(data) == "Instance" and getInstancePath(data)) or userdataValue(data)
+local function tableToString(data, root, indents, seen)
+    local dataType = type(data)
+    local valueType = typeof(data)
+
+    if dataType == "userdata" or valueType ~= dataType or isBuffer(data) then
+        return (valueType == "Instance" and getInstancePath(data)) or userdataValue(data)
     elseif dataType == "string" then
-        if #(data:gsub('%w', ''):gsub('%s', ''):gsub('%p', '')) > 0 then
+        if #(data:gsub("%w", ""):gsub("%s", ""):gsub("%p", "")) > 0 then
             local success, result = pcall(toUnicode, data)
             return (success and result) or toString(data)
-        else
-            return ('"%s"'):format(data:gsub('"', '\\"'))
         end
+
+        return dataToString(data)
     elseif dataType == "table" then
         indents = indents or 1
-        root = root or data
+        seen = seen or {}
 
-        local head = '{\n'
+        if seen[data] then
+            return "OH_CYCLIC_PROTECTION"
+        end
+
+        seen[data] = true
+        local head = "{\n"
         local elements = 0
-        local indent = ('\t'):rep(indents)
-        
-        for i,v in pairs(data) do
-            if i ~= root and v ~= root then
-                head = head .. ("%s[%s] = %s,\n"):format(indent, tableToString(i, root, indents + 1), tableToString(v, root, indents + 1))
-            else
+        local indent = ("\t"):rep(indents)
+
+        for index, value in pairs(data) do
+            if index == root or value == root then
                 head = head .. ("%sOH_CYCLIC_PROTECTION,\n"):format(indent)
+            else
+                head = head .. ("%s[%s] = %s,\n"):format(
+                    indent,
+                    tableToString(index, root or data, indents + 1, seen),
+                    tableToString(value, root or data, indents + 1, seen)
+                )
             end
 
             elements = elements + 1
         end
-        
+
+        seen[data] = nil
+
         if elements > 0 then
-            return ("%s\n%s"):format(head:sub(1, -3), ('\t'):rep(indents - 1) .. '}')
-        else
-            return "{}"
+            return ("%s\n%s"):format(head:sub(1, -3), ("\t"):rep(indents - 1) .. "}")
         end
+
+        return "{}"
     end
 
     return tostring(data)
 end
 
 local function compareTables(x, y)
-    for i, v in pairs(x) do
-        if v ~= y[i] then
+    for index, value in pairs(x) do
+        if value ~= y[index] then
             return false
         end
     end

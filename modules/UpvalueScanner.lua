@@ -11,31 +11,39 @@ local requiredMethods = {
     ["getUpvalues"] = true
 }
 
-local function compareUpvalue(query, upvalue, ignore)
+local function compareUpvalue(query, upvalue, ignoreNumberMatch)
     local upvalueType = type(upvalue)
+    local loweredQuery = query:lower()
 
-    local stringCheck = upvalueType == "string" and (query == upvalue or upvalue:lower():find(query:lower()))
-    local numberCheck = not ignore and upvalueType == "number" and not isTableIndex and (tonumber(query) == upvalue or ("%.2f"):format(upvalue) == query)
-    
-    if upvalueType == "userdata" then
-        if typeof(upvalueType) == "Instance" then
+    if upvalueType == "string" then
+        local loweredValue = upvalue:lower()
+        return query == upvalue or loweredValue:find(loweredQuery, 1, true) ~= nil
+    elseif upvalueType == "number" and not ignoreNumberMatch then
+        local numericQuery = tonumber(query)
+        return numericQuery == upvalue or ("%.2f"):format(upvalue) == query
+    elseif upvalueType == "boolean" then
+        return tostring(upvalue) == loweredQuery
+    elseif upvalueType == "userdata" then
+        if typeof(upvalue) == "Instance" then
             local instanceName = upvalue.Name
-            return (instanceName == query or instanceName:find(query))
+            return instanceName == query or instanceName:lower():find(loweredQuery, 1, true) ~= nil
         end
 
         return toString(upvalue) == query
     elseif upvalueType == "function" then
-        local closureName = getInfo(upvalue).name or ''
-        return query == closureName or closureName:lower():find(query:lower())
+        local closureName = getInfo(upvalue).name or ""
+        local loweredName = closureName:lower()
+
+        return query == closureName or loweredName:find(loweredQuery, 1, true) ~= nil
     end
 
-    return stringCheck or numberCheck or userDataCheck
+    return false
 end
 
 local function scan(query, deepSearch)
     local upvalues = {}
 
-    for _i, closure in pairs(getGc()) do
+    for _, closure in pairs(getGc()) do
         if type(closure) == "function" and not isXClosure(closure) and not upvalues[closure] then
             for index, value in pairs(getUpvalues(closure)) do
                 local valueType = type(value)
@@ -44,31 +52,29 @@ local function scan(query, deepSearch)
                     local storage = upvalues[closure]
 
                     if not storage then
-                        local newClosure = Closure.new(closure)
-                        newClosure.Upvalues[index] = Upvalue.new(newClosure, index, value)
-                        upvalues[closure] = newClosure
-                    else
-                        storage.Upvalues[index] = Upvalue.new(storage, index, value)
+                        storage = Closure.new(closure)
+                        upvalues[closure] = storage
                     end
+
+                    storage.Upvalues[index] = Upvalue.new(storage, index, value)
                 elseif deepSearch and valueType == "table" then
                     local storage = upvalues[closure]
-                    local table
+                    local tableUpvalue
 
-                    for i, v in pairs(value) do
-                        if (i ~= value and v ~= value) and (compareUpvalue(query, i, true) or compareUpvalue(query, v)) then
+                    for key, nestedValue in pairs(value) do
+                        if (key ~= value and nestedValue ~= value) and (compareUpvalue(query, key, true) or compareUpvalue(query, nestedValue)) then
                             if not storage then
-                                local newClosure = Closure.new(closure)
-                                storage = newClosure
-                                upvalues[closure] = newClosure
+                                storage = Closure.new(closure)
+                                upvalues[closure] = storage
                             end
 
-                            if not table then
-                                table = Upvalue.new(storage, index, value)
-                                table.Scanned = {}
-                                storage.Upvalues[index] = table
+                            if not tableUpvalue then
+                                tableUpvalue = Upvalue.new(storage, index, value)
+                                tableUpvalue.Scanned = {}
+                                storage.Upvalues[index] = tableUpvalue
                             end
 
-                            table.Scanned[i] = v
+                            tableUpvalue.Scanned[key] = nestedValue
                         end
                     end
                 end
