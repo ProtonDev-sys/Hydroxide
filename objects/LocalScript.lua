@@ -156,17 +156,34 @@ function LocalScript.loadProtos(localScript)
 end
 
 function LocalScript.decompile(localScript, target)
-	if type(decompile) ~= "function" then
-		return unavailable("decompile")
-	end
-
 	if target then
 		local cached = localScript.FunctionSources[target]
 
 		if cached then
 			return cached.Source, cached.Error
 		end
+	elseif localScript.LoadedSource then
+		return localScript.Source, localScript.SourceError
+	end
 
+	if type(decompile) ~= "function" then
+		local _, sourceError = unavailable("decompile")
+
+		if target then
+			localScript.FunctionSources[target] = {
+				Source = nil,
+				Error = sourceError,
+			}
+		else
+			localScript.Source = nil
+			localScript.SourceError = sourceError
+			localScript.LoadedSource = true
+		end
+
+		return nil, sourceError
+	end
+
+	if target then
 		local ran, source = pcall(decompile, target)
 		local sourceError
 
@@ -180,8 +197,6 @@ function LocalScript.decompile(localScript, target)
 			Error = sourceError,
 		}
 		return source, sourceError
-	elseif localScript.LoadedSource then
-		return localScript.Source, localScript.SourceError
 	end
 
 	local ran, source = pcall(decompile, localScript.Instance)

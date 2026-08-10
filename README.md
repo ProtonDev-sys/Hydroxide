@@ -78,7 +78,7 @@ getgenv().import("ui/main")
 This fork targets the current [Potassium API reference](https://docs.potassium.pro/) and keeps legacy aliases only as fallbacks. The runtime uses Potassium's documented APIs directly:
 
 * `filtergc` narrows scanner work to non-executor Lua closures instead of walking every GC object.
-* `getrunningscripts` powers Script Scanner without a GC scan.
+* `getrunningscripts` powers Script Scanner for running `LocalScript` and client-context `Script` instances without a GC scan.
 * `hookmetamethod` captures ordinary namecalls on their original thread for caller filtering and stack/source inspection. Potassium's `oth.hook`, `oth.get_root_callback`, `oth.get_original_thread`, and `oth.unhook(target)` provide the direct C-function pass-through, with `hookfunction` retained as a fallback.
 * `getscriptfromthread` preserves calling-script attribution for off-thread hooks.
 * `debug.getcallstack` captures bounded call stacks for remote and closure calls when the active hook runs on the original thread.
@@ -86,7 +86,7 @@ This fork targets the current [Potassium API reference](https://docs.potassium.p
 * `restorefunction` and documented `Connection:Enable()` teardown restore hooks and temporarily disabled error connections.
 * `getthreadidentity` and `setthreadidentity` capture the launch identity and restore it around privileged inspection work, replacing legacy thread-context names internally.
 
-Remote and closure histories use fixed-capacity circular buffers, while visible call rows are rendered in a smaller window to keep high-traffic sessions responsive. Every matching call is still counted and logged into that bounded history, while expensive stack snapshots use a token-bucket limit (`maxStackCapturesPerSecond`, default 60) so remote spam cannot stall the client; calls skipped by that safeguard are labelled in the inspector. Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. The main Hydroxide window expands to the available viewport, and RemoteSpy/ClosureSpy call logs expose built-in inspector action strips for arguments, returns, cleaned call chains, caller and target functions, decompiled scripts, paths, replay code, confirmed replay calls, diagnostics, and hex previews. Inspector output opens inside the Hydroxide menu instead of modal source popups, and very large inspector panes are capped by `MaxInspectorBytes` (default 512 KB) to keep the UI responsive. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, `captureExecutorCalls = false` to hide RemoteSpy calls unless they are confirmed to come from a game thread, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
+Remote and closure histories use fixed-capacity circular buffers, while visible call rows are rendered in a smaller window to keep high-traffic sessions responsive. Every matching call is still counted and logged into that bounded history, while expensive stack snapshots use a token-bucket limit (`maxStackCapturesPerSecond`, default 60) so remote spam cannot stall the client; calls skipped by that safeguard are labelled in the inspector. Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. The main Hydroxide window expands to the available viewport, and RemoteSpy/ClosureSpy call logs expose built-in inspector action strips for arguments, returns, cleaned call chains, caller and target functions, decompiled scripts, paths, replay code, confirmed replay calls, diagnostics, and hex previews. Inspector output opens inside the Hydroxide menu instead of modal source popups, and very large inspector panes are capped by `MaxInspectorBytes` (default 512 KB) to keep the UI responsive. Script Scanner builds only the visible detail list, while Upvalue Scanner refreshes visible results in bounded round-robin batches instead of rescanning every closure every frame. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, `captureExecutorCalls = false` to hide RemoteSpy calls unless they are confirmed to come from a game thread, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
 
 Click a captured RemoteSpy or ClosureSpy call to enable the inspector actions; right-click still opens the same actions as a shortcut. RemoteSpy replay generation opens an editable code viewer, while **Copy Code** copies the generated source. It preserves packed nils, shared and cyclic tables, binary strings, non-finite numbers, and safe Instance paths; values that cannot be reconstructed are explicitly warned about and omitted instead of producing broken code. Generation is bounded by the table, depth, string, buffer, and output limits above. Live replay requires confirmation, and an intentionally blocked remote must be unblocked first. Click a Module Scanner row to view the module's decompiled source; Script Scanner rows now populate source, environment, proto, and constant panes lazily, and function rows open their metadata, environment, constants, protos, upvalues, hash, and decompiled source in the same menu panel.
 
@@ -114,8 +114,8 @@ Report issues in [ProtonDev-sys/Hydroxide](https://github.com/ProtonDev-sys/Hydr
     * View/Modify Constants
     * View information of closure
 * Script Scanner
-    * View general information of scripts (source, protos, constants, etc.)
-    * Retrieve protos from running LocalScripts
+    * View general information of scripts (source, environment, protos, constants, etc.)
+    * Retrieve protos from running client `BaseScript` instances
 * Module Scanner
     * Browse loaded ModuleScripts and view their complete decompiled source
 * RemoteSpy

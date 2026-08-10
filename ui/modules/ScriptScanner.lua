@@ -63,6 +63,7 @@ local ensureMetadata
 local functionInspectionGeneration = 0
 local icons = {
 	LocalScript = "rbxassetid://4800244808",
+	Script = "rbxassetid://4800244808",
 }
 
 local constants = {
@@ -138,8 +139,8 @@ local function metricText(loaded, values, errorMessage)
 	return #(values or {})
 end
 
-local function showSource(title, source, errorMessage)
-	if showSectionByName then
+local function showSource(title, source, errorMessage, activate)
+	if activate ~= false and showSectionByName then
 		showSectionByName("Source")
 	end
 
@@ -165,6 +166,16 @@ local function showSourceText(title, text)
 	TextViewer.Show(title, tostring(text or ""), {
 		Parent = InfoSource,
 	})
+end
+
+local function visibleSectionName()
+	for _, section in ipairs(InfoSections:GetChildren()) do
+		if section:IsA("GuiObject") and section.Visible then
+			return section.Name
+		end
+	end
+
+	return "Source"
 end
 
 local function getSearchText(query)
@@ -290,6 +301,7 @@ local function viewFunctionSource(func)
 		return showSource("Function Source", nil, "No function is selected")
 	end
 
+	selected.sourceView = "function"
 	functionInspectionGeneration = functionInspectionGeneration + 1
 	local generation = functionInspectionGeneration
 	showSource("Function Inspector", "Inspecting function metadata, environment, constants, protos, and source ...")
@@ -322,6 +334,8 @@ local function viewValue(title, index, value)
 	if type(value) == "function" then
 		return viewFunctionSource(value)
 	end
+
+	selected.sourceView = "value"
 
 	local valueType = safeTypeof(value)
 	local lines = {
@@ -526,6 +540,15 @@ renderSelectedSection = function(sectionName)
 	end
 end
 
+local function clearDetailLists()
+	environmentList:Clear()
+	protosList:Clear()
+	constantsList:Clear()
+	EnvironmentResultsStatus.Text = ""
+	ProtosResultsStatus.Text = ""
+	ConstantsResultsStatus.Text = ""
+end
+
 local function updateSummaryCounts(log)
 	local button = log.Button and log.Button.Instance
 
@@ -583,6 +606,7 @@ function Log.new(localScript)
 	local function openLog()
 		selected.scriptLog = log
 		selected.logContext = log
+		selected.sourceView = "script"
 		selected.protoFunction = nil
 		selected.constantValue = nil
 		selected.constantIndex = nil
@@ -599,7 +623,7 @@ function Log.new(localScript)
 
 		local nameLength = TextService:GetTextSize(scriptName, 18, "SourceSans", constants.textWidth).X + 20
 
-		InfoScript.Icon.Image = icons.LocalScript
+		InfoScript.Icon.Image = icons[scriptInstance.ClassName] or icons.LocalScript
 		InfoScript.Label.Text = scriptName
 		InfoScript.Label.Size = UDim2.new(0, nameLength, 0, 20)
 		InfoScript.Position = UDim2.new(1, -nameLength, 0, 0)
@@ -609,7 +633,7 @@ function Log.new(localScript)
 		else
 			showSourceText("Loading Source", "Decompiling " .. scriptName .. " ...")
 		end
-		renderSelectedSection()
+		clearDetailLists()
 
 		if log.DetailsLoaded or log.DetailsLoading then
 			return
@@ -628,17 +652,37 @@ function Log.new(localScript)
 				log.MetadataLoaded = true
 			end
 
-			local loaded, loadError = pcall(function()
+			if selected.scriptLog == log then
+				local sectionName = visibleSectionName()
+
+				if sectionName == "Protos" or sectionName == "Constants" then
+					renderSelectedSection(sectionName)
+				end
+			end
+
+			local environmentLoaded, environmentLoadError = pcall(function()
 				runPrivileged(function()
 					log.Environment, log.EnvironmentError = localScript:LoadEnvironment()
+				end)
+			end)
+
+			if not environmentLoaded then
+				local message = "Environment inspection failed: " .. tostring(environmentLoadError)
+				log.EnvironmentError = log.EnvironmentError or message
+			end
+
+			if selected.scriptLog == log and visibleSectionName() == "Environment" then
+				renderSelectedSection("Environment")
+			end
+
+			local sourceLoaded, sourceLoadError = pcall(function()
+				runPrivileged(function()
 					log.Source, log.SourceError = localScript:Decompile()
 				end)
 			end)
 
-			if not loaded then
-				local message = "Script inspection failed: " .. tostring(loadError)
-				log.EnvironmentError = log.EnvironmentError or message
-				log.SourceError = log.SourceError or message
+			if not sourceLoaded then
+				log.SourceError = log.SourceError or ("Source inspection failed: " .. tostring(sourceLoadError))
 			end
 
 			log.DetailsLoading = false
@@ -646,8 +690,15 @@ function Log.new(localScript)
 			updateSummaryCounts(log)
 
 			if selected.scriptLog == log then
-				showSource(scriptName .. " Source", log.Source, log.SourceError)
-				renderSelectedSection()
+				if selected.sourceView == "script" then
+					showSource(scriptName .. " Source", log.Source, log.SourceError, false)
+				end
+
+				local sectionName = visibleSectionName()
+
+				if sectionName ~= "Source" then
+					renderSelectedSection(sectionName)
+				end
 			end
 		end)
 	end
@@ -738,6 +789,7 @@ local function addScripts(query)
 	scriptLogs = {}
 	selected.scriptLog = nil
 	selected.logContext = nil
+	selected.sourceView = nil
 	functionInspectionGeneration = functionInspectionGeneration + 1
 	scriptList:BeginBatch()
 
@@ -856,6 +908,10 @@ for _i, sectionButton in pairs(InfoOptions:GetChildren()) do
 
 		sectionButton.MouseButton1Click:Connect(function()
 			showSectionByName(sectionButton.Name)
+
+			if sectionButton.Name ~= "Source" and selected.scriptLog then
+				renderSelectedSection(sectionButton.Name)
+			end
 		end)
 
 		sectionButton.MouseEnter:Connect(function()

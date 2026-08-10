@@ -119,6 +119,25 @@ assertEqual(environmentError, "Script environment was not returned", "failed env
 failingEnvironmentModel:LoadEnvironment()
 assertEqual(failingEnvironmentCalls, 1, "failed environment lookup is cached")
 
+_G.decompile = nil
+local unavailableFunction = function() end
+local unavailableLocalModel = LocalScript.new({})
+local unavailableModuleModel = ModuleScript.new({})
+local _, unavailableLocalError = unavailableLocalModel:Decompile()
+local _, unavailableFunctionError = unavailableLocalModel:Decompile(unavailableFunction)
+local _, unavailableModuleError = unavailableModuleModel:Decompile()
+
+assertEqual(unavailableLocalError, "decompile is not available in this executor", "local source capability error")
+assertEqual(unavailableFunctionError, unavailableLocalError, "function source capability error")
+assertEqual(unavailableModuleError, unavailableLocalError, "module source capability error")
+assertEqual(unavailableLocalModel.LoadedSource, true, "local source capability error cached")
+assertEqual(unavailableModuleModel.LoadedSource, true, "module source capability error cached")
+assertEqual(
+    unavailableLocalModel:Decompile(unavailableFunction),
+    nil,
+    "cached unavailable function source stays unavailable"
+)
+
 local function makeScript(className, name)
     local instance = {
         __instance = true,
@@ -128,6 +147,7 @@ local function makeScript(className, name)
 
     function instance:IsA(targetClass)
         return self.ClassName == targetClass
+            or (targetClass == "BaseScript" and (self.ClassName == "LocalScript" or self.ClassName == "Script"))
     end
 
     return instance
@@ -138,9 +158,10 @@ _G.typeof = function(value)
 end
 
 local runningLocal = makeScript("LocalScript", "RunningClient")
+local runningScript = makeScript("Script", "RunningClientContext")
 local loadedModule = makeScript("ModuleScript", "LoadedModule")
 _G.getRunningScripts = function()
-    return { runningLocal, loadedModule }
+    return { runningLocal, runningScript, loadedModule }
 end
 _G.getLoadedModules = function()
     return { loadedModule, runningLocal }
@@ -164,6 +185,7 @@ local scriptResults = ScriptScanner.Scan("running")
 local moduleResults = ModuleScanner.Scan("loaded")
 
 assertEqual(scriptResults[runningLocal].Instance, runningLocal, "running LocalScript enumerated")
+assertEqual(scriptResults[runningScript].Instance, runningScript, "running client-context Script enumerated")
 assertEqual(scriptResults[loadedModule], nil, "ModuleScript excluded from ScriptScanner")
 assertEqual(moduleResults[loadedModule].Instance, loadedModule, "loaded ModuleScript enumerated")
 assertEqual(moduleResults[runningLocal], nil, "LocalScript excluded from ModuleScanner")

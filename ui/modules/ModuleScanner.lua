@@ -20,7 +20,7 @@ local Results = Page.Results.Clip.Content
 local moduleList = List.new(Results)
 local moduleLogs = {}
 local selectedLog
-local sourceGeneration = 0
+local sourceLoads = setmetatable({}, { __mode = "k" })
 
 local pathContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Module Path")
 local sourceContext = ContextMenuButton.new("rbxassetid://4800244808", "View Module Source")
@@ -51,10 +51,19 @@ local function showSource(title, source, errorMessage)
 end
 
 local function viewModuleSource(moduleScript)
-	sourceGeneration = sourceGeneration + 1
-	local generation = sourceGeneration
 	local title = moduleScript.Instance.Name .. " Source"
+
+	if moduleScript.LoadedSource then
+		return showSource(title, moduleScript.Source, moduleScript.SourceError)
+	end
+
 	showSource(title, "Decompiling module ...")
+
+	if sourceLoads[moduleScript] then
+		return
+	end
+
+	sourceLoads[moduleScript] = true
 
 	task.spawn(function()
 		local source, sourceError
@@ -68,7 +77,9 @@ local function viewModuleSource(moduleScript)
 			sourceError = "Module inspection failed: " .. tostring(inspectError)
 		end
 
-		if generation == sourceGeneration then
+		sourceLoads[moduleScript] = nil
+
+		if selectedLog and selectedLog.ModuleScript == moduleScript then
 			showSource(title, source, sourceError)
 		end
 	end)
@@ -116,7 +127,6 @@ end)
 -- UI Functionality
 
 local function addModules(query)
-	sourceGeneration = sourceGeneration + 1
 	moduleList:Clear()
 	moduleLogs = {}
 	selectedLog = nil

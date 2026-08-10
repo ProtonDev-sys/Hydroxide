@@ -40,7 +40,8 @@ local deepSearch = CheckBox.new(Filters.SearchInTables)
 local upvalueList = List.new(ResultsClip.Content)
 
 local deepSearchFlag = false
-local currentUpvalues = {}
+local updateQueue = {}
+local updateIndex = 1
 
 local selectedLog
 local selectedUpvalue
@@ -303,7 +304,7 @@ function Log.new(closure)
         inspectSelectedFunction()
     end)
     
-    currentUpvalues[closure.Data] = log
+    updateQueue[#updateQueue + 1] = log
 
     upvalueList:Recalculate()
     return log
@@ -331,7 +332,8 @@ local function addUpvalues()
         local showResultLabel = false
 
         upvalueList:Clear()
-        currentUpvalues = {}
+        updateQueue = {}
+        updateIndex = 1
 
         for _i, closure in pairs(Methods.Scan(query, deepSearchFlag)) do
             if closure.Name == "Unnamed function" then
@@ -764,9 +766,35 @@ changeElementContext:SetCallback(function()
     end
 end)
 
-oh.Events.UpdateUpvalues = RunService.Heartbeat:Connect(function()
-    for _i, closureLog in pairs(currentUpvalues) do
-        closureLog:Update()
+local updateAccumulator = 0
+local updateInterval = 0.15
+local maxLogsPerTick = 8
+
+oh.Events.UpdateUpvalues = RunService.Heartbeat:Connect(function(deltaTime)
+    if not Page.Visible or #updateQueue == 0 then
+        updateAccumulator = 0
+        return
+    end
+
+    updateAccumulator = updateAccumulator + (tonumber(deltaTime) or 0)
+
+    if updateAccumulator < updateInterval then
+        return
+    end
+
+    updateAccumulator = updateAccumulator % updateInterval
+
+    for _ = 1, math.min(maxLogsPerTick, #updateQueue) do
+        if updateIndex > #updateQueue then
+            updateIndex = 1
+        end
+
+        local closureLog = updateQueue[updateIndex]
+        updateIndex = updateIndex + 1
+
+        if closureLog and closureLog.Instance and closureLog.Instance.Parent then
+            closureLog:Update()
+        end
     end
 end)
 

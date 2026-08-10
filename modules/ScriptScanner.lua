@@ -24,7 +24,7 @@ local function scan(query)
     for _, script in pairs(getScriptList()) do
         if typeof(script) == "Instance"
             and not scripts[script]
-            and script:IsA("LocalScript")
+            and script:IsA("BaseScript")
             and script.Name:lower():find(query, 1, true)
         then
             scripts[script] = LocalScript.new(script)

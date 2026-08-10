@@ -14,10 +14,6 @@ function ModuleScript.new(instance)
 end
 
 function ModuleScript.decompile(moduleScript, target)
-    if type(decompile) ~= "function" then
-        return nil, "decompile is not available in this executor"
-    end
-
     if target then
         local cached = moduleScript.FunctionSources[target]
 
@@ -26,6 +22,23 @@ function ModuleScript.decompile(moduleScript, target)
         end
     elseif moduleScript.LoadedSource then
         return moduleScript.Source, moduleScript.SourceError
+    end
+
+    if type(decompile) ~= "function" then
+        local sourceError = "decompile is not available in this executor"
+
+        if target then
+            moduleScript.FunctionSources[target] = {
+                Source = nil,
+                Error = sourceError
+            }
+        else
+            moduleScript.Source = nil
+            moduleScript.SourceError = sourceError
+            moduleScript.LoadedSource = true
+        end
+
+        return nil, sourceError
     end
 
     local subject = target or moduleScript.Instance
