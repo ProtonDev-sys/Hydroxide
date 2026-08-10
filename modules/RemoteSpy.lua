@@ -629,36 +629,10 @@ local function installDirectHook(target, targetMethod)
     diagnostics.DirectHookAttempts = diagnostics.DirectHookAttempts + 1
     local lastFailure
 
-    if hookFunction then
-        diagnostics.FunctionHookAttempts = diagnostics.FunctionHookAttempts + 1
-        local original
-        local callback = createDirectHookCallback(targetMethod, false)
-        local callbackWrapper = function(...)
-            return callback(original, ...)
-        end
-        registerInternal(callbackWrapper)
-
-        local wrapper = registerInternal(newCClosure and newCClosure(callbackWrapper) or callbackWrapper)
-        local ran, result = pcall(hookFunction, target, wrapper)
-
-        if ran and type(result) == "function" then
-            original = result
-            oh.Hooks[#oh.Hooks + 1] = {
-                Kind = "function",
-                Target = target,
-                Original = original,
-                Active = true
-            }
-            diagnostics.DirectHooksInstalled = diagnostics.DirectHooksInstalled + 1
-            return true
-        end
-
-        diagnostics.FunctionHookFailures = diagnostics.FunctionHookFailures + 1
-        lastFailure = ran and "hookFunction did not return the original closure" or result
-    end
-
-    -- OTH hooks run off-thread, so caller stacks and executor filtering are
-    -- limited. Use them only when the standard original-thread hook path fails.
+    -- Potassium's documented pass-through for hooked C functions is the root
+    -- callback supplied to an OTH hook. Prefer that path for Instance methods;
+    -- the namecall hook still captures the original-thread stack for ordinary
+    -- colon calls, while the nested OTH hook is deduplicated by thread context.
     if othHook and othGetRootCallback and othUnhook then
         diagnostics.OthHookAttempts = diagnostics.OthHookAttempts + 1
         local callback = createDirectHookCallback(targetMethod, true)
@@ -686,6 +660,34 @@ local function installDirectHook(target, targetMethod)
 
         diagnostics.OthHookFailures = diagnostics.OthHookFailures + 1
         lastFailure = ran and "othHook returned false" or result
+    end
+
+    if hookFunction then
+        diagnostics.FunctionHookAttempts = diagnostics.FunctionHookAttempts + 1
+        local original
+        local callback = createDirectHookCallback(targetMethod, false)
+        local callbackWrapper = function(...)
+            return callback(original, ...)
+        end
+        registerInternal(callbackWrapper)
+
+        local wrapper = registerInternal(newCClosure and newCClosure(callbackWrapper) or callbackWrapper)
+        local ran, result = pcall(hookFunction, target, wrapper)
+
+        if ran and type(result) == "function" then
+            original = result
+            oh.Hooks[#oh.Hooks + 1] = {
+                Kind = "function",
+                Target = target,
+                Original = original,
+                Active = true
+            }
+            diagnostics.DirectHooksInstalled = diagnostics.DirectHooksInstalled + 1
+            return true
+        end
+
+        diagnostics.FunctionHookFailures = diagnostics.FunctionHookFailures + 1
+        lastFailure = ran and "hookFunction did not return the original closure" or result
     end
 
     diagnostics.DirectHookFailures = diagnostics.DirectHookFailures + 1

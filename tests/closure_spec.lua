@@ -16,12 +16,22 @@ table.find = table.find or function(values, target)
 end
 
 _G.typeof = _G.typeof or type
+_G.DateTime = {
+    now = function()
+        return { UnixTimestampMillis = 1700000000123 }
+    end
+}
 
 local wrappers = {}
 local originalCalls = 0
 local externalCaller = function() end
 local target = function(...)
     originalCalls = originalCalls + 1
+
+    if select(1, ...) == "explode" then
+        error("target exploded")
+    end
+
     return "result", nil, select("#", ...)
 end
 
@@ -69,6 +79,16 @@ _G.getCallStack = function(offset)
     assertEqual(offset, 0, "Potassium call stack offset")
     return {
         {
+            name = "getcallstack",
+            source = "=[C]",
+            line = -1
+        },
+        {
+            name = "pcall",
+            source = "=[C]",
+            line = -1
+        },
+        {
             func = function() end,
             name = "ClosureSpyInternal",
             source = "@modules/ClosureSpy.lua",
@@ -76,9 +96,15 @@ _G.getCallStack = function(offset)
         },
         {
             func = externalCaller,
-            name = "ExternalCaller",
-            source = "@game/ExternalCaller.lua",
-            line = 42
+            name = "<anonymous>",
+            source = "=ReplicatedStorage.Modules.EventManagerClient",
+            line = 10
+        },
+        {
+            func = function() end,
+            name = "<anonymous>",
+            source = "=Players.PlayerScripts.Gameplay.C_LootDropHandler",
+            line = 337
         }
     }
 end
@@ -99,12 +125,19 @@ assertEqual(hook.Calls, 1, "pre-subscriber call retained")
 assertEqual(hook.Logs[1].args.n, 3, "packed argument length retained")
 assertEqual(hook.Logs[1].args[3], "third", "argument after nil retained")
 assertEqual(hook.Logs[1].func, externalCaller, "external caller selected")
+assertEqual(hook.Logs[1].caller.name, "EventManagerClient", "anonymous caller gets a useful name")
+assertEqual(
+    hook.Logs[1].caller.source,
+    "ReplicatedStorage.Modules.EventManagerClient",
+    "caller source normalized"
+)
 assertEqual(hook.Logs[1].completed, true, "forwarded closure call is marked complete")
 assertEqual(hook.Logs[1].forwarded, true, "forwarded closure call is marked forwarded")
 assertEqual(hook.Logs[1].returns.n, 3, "closure return count retained")
 assertEqual(hook.Logs[1].returns[1], "result", "closure return value retained")
 assertEqual(hook.Logs[1].returns[3], 3, "closure return value after nil retained")
-assertEqual(#hook.Logs[1].stack, 1, "internal call-stack frame filtered")
+assertEqual(#hook.Logs[1].stack, 2, "native and internal call-stack frames filtered")
+assertEqual(hook.Logs[1].stack[2].name, "C_LootDropHandler", "anonymous parent frame gets a useful name")
 assertEqual(#hook.Logs[1].chain, 1, "active closure chain captured")
 
 local emitted = 0
@@ -137,6 +170,14 @@ wrapper("condition-blocked", nil)
 assertEqual(originalCalls, 3, "nil argument block skips original")
 assertEqual(hook.Calls, 4, "argument-blocked call is captured")
 assertEqual(hook.DroppedLogs, 2, "retention remains bounded")
+
+local errorRan, errorMessage = pcall(wrapper, "explode")
+local errorCall = hook.Logs[#hook.Logs]
+assertEqual(errorRan, false, "target error is preserved")
+assertEqual(errorMessage:find("target exploded", 1, true) ~= nil, true, "target error message is preserved")
+assertEqual(errorCall.completed, true, "errored closure call is marked complete")
+assertEqual(errorCall.forwarded, false, "errored closure call is not marked forwarded")
+assertEqual(errorCall.error:find("target exploded", 1, true) ~= nil, true, "errored closure call retains error")
 
 assertEqual(hook:Remove(), true, "hook removal succeeds")
 assertEqual(closure.Data, target, "closure target restored")

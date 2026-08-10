@@ -16,6 +16,11 @@ table.find = table.find or function(values, target)
     end
 end
 
+local packValues = table.pack or function(...)
+    return { n = select("#", ...), ... }
+end
+local unpackValues = table.unpack or unpack
+
 local Remote = dofile(root .. "objects/Remote.lua")
 local remote = Remote.new({}, 2)
 local first = { id = 1 }
@@ -55,6 +60,7 @@ print("remote_spec.lua: ok")
 do
     local originalCalls = 0
     local directWrappers = {}
+    local currentRootCallback
     local namecallWrapper
     local currentNamecallMethod = "FireServer"
     local externalCaller = function() end
@@ -166,6 +172,16 @@ do
         assertEqual(offset, 0, "Potassium call stack offset")
         return {
             {
+                name = "getcallstack",
+                source = "=[C]",
+                line = -1
+            },
+            {
+                name = "pcall",
+                source = "=[C]",
+                line = -1
+            },
+            {
                 func = function() end,
                 name = "RemoteSpyInternal",
                 source = "@modules/RemoteSpy.lua",
@@ -173,9 +189,15 @@ do
             },
             {
                 func = externalCaller,
-                name = "ExternalCaller",
-                source = "@game/ExternalCaller.lua",
-                currentline = 42
+                name = "<anonymous>",
+                source = "=ReplicatedStorage.Modules.EventManagerClient",
+                currentline = 10
+            },
+            {
+                func = function() end,
+                name = "<anonymous>",
+                source = "=Players.PlayerScripts.Gameplay.C_LootDropHandler",
+                currentline = 337
             }
         }
     end
@@ -184,16 +206,28 @@ do
     end
     _G.newCClosure = nil
     local othHookCalls = 0
-    _G.othHook = function()
+    _G.othHook = function(target, wrapper)
         othHookCalls = othHookCalls + 1
-        return false
+        directWrappers[target] = function(...)
+            currentRootCallback = target
+            local results = packValues(pcall(wrapper, ...))
+            currentRootCallback = nil
+
+            if not results[1] then
+                error(results[2], 0)
+            end
+
+            return unpackValues(results, 2, results.n)
+        end
     end
     _G.othGetRootCallback = function()
-        error("an explicitly failed OTH hook must never run")
+        return currentRootCallback
     end
+    _G.othGetOriginalThread = coroutine.running
     _G.othUnhook = function() end
+    local hookFunctionCalls = 0
     _G.hookFunction = function(target, wrapper)
-        directWrappers[target] = wrapper
+        hookFunctionCalls = hookFunctionCalls + 1
         return target
     end
 
@@ -219,9 +253,10 @@ do
     local RemoteSpy = dofile(root .. "modules/RemoteSpy.lua")
     assertEqual(RemoteSpy.RemotesViewing.RemoteFunction, true, "RemoteFunction enabled by default")
     assertEqual(RemoteSpy.Diagnostics.NamecallHookInstalled, true, "namecall hook always installed")
-    assertEqual(RemoteSpy.Diagnostics.DirectHooksInstalled, 5, "original-thread function hooks installed")
-    assertEqual(RemoteSpy.Diagnostics.DirectHookFailures, 0, "successful function hooks do not report failures")
-    assertEqual(othHookCalls, 0, "off-thread hooks are reserved for fallback")
+    assertEqual(RemoteSpy.Diagnostics.DirectHooksInstalled, 5, "off-thread C-function hooks installed")
+    assertEqual(RemoteSpy.Diagnostics.DirectHookFailures, 0, "successful direct hooks do not report failures")
+    assertEqual(othHookCalls, 5, "Potassium OTH is preferred for C-function pass-through")
+    assertEqual(hookFunctionCalls, 0, "hookfunction remains a fallback when OTH succeeds")
 
     local event = newInstance("RemoteEvent")
     local result = namecallWrapper(event, "first", nil, "third")
@@ -232,13 +267,18 @@ do
     assertEqual(eventModel.Logs[1].args.n, 3, "captured arguments retain packed length")
     assertEqual(eventModel.Logs[1].args[3], "third", "captured argument after nil retained")
     assertEqual(eventModel.Logs[1].func, externalCaller, "first external stack frame selected as caller")
-    assertEqual(eventModel.Logs[1].caller.name, "ExternalCaller", "external caller name retained")
-    assertEqual(eventModel.Logs[1].caller.source, "game/ExternalCaller.lua", "external caller source retained")
-    assertEqual(eventModel.Logs[1].caller.line, 42, "external caller line retained")
+    assertEqual(eventModel.Logs[1].caller.name, "EventManagerClient", "anonymous caller gets a useful name")
+    assertEqual(
+        eventModel.Logs[1].caller.source,
+        "ReplicatedStorage.Modules.EventManagerClient",
+        "caller source normalized"
+    )
+    assertEqual(eventModel.Logs[1].caller.line, 10, "external caller line retained")
     assertEqual(eventModel.Logs[1].completed, true, "forwarded call is marked complete")
     assertEqual(eventModel.Logs[1].forwarded, true, "forwarded call is marked forwarded")
     assertEqual(eventModel.Logs[1].returns[1], "remote-event-result", "forwarded return value retained")
-    assertEqual(#eventModel.Logs[1].stack, 1, "internal RemoteSpy stack frames filtered")
+    assertEqual(#eventModel.Logs[1].stack, 2, "native and internal RemoteSpy stack frames filtered")
+    assertEqual(eventModel.Logs[1].stack[2].name, "C_LootDropHandler", "anonymous parent frame gets a useful name")
     assertEqual(RemoteSpy.Diagnostics.CallsDeduplicated, 1, "direct/namecall pair deduplicated")
 
     local executorEvent = newInstance("RemoteEvent")
@@ -271,7 +311,7 @@ do
     eventModel.AreArgsIgnored = function()
         error("capture failure")
     end
-    directWrappers[classMethods.RemoteEvent.FireServer](event, "capture-error")
+    namecallWrapper(event, "capture-error")
     assertEqual(originalCalls, callsBeforeCaptureError + 1, "capture failure is fail-open")
     assertEqual(RemoteSpy.Diagnostics.CaptureErrors > 0, true, "capture failure diagnosed")
     eventModel.AreArgsIgnored = originalAreArgsIgnored
@@ -279,14 +319,14 @@ do
 
     eventModel:SetBlocked(true)
     local callsBeforeBlock = originalCalls
-    directWrappers[classMethods.RemoteEvent.FireServer](event, "blocked")
+    namecallWrapper(event, "blocked")
     local blockedCall = eventModel.Logs[#eventModel.Logs]
     assertEqual(originalCalls, callsBeforeBlock, "blocked call does not reach original")
     assertEqual(blockedCall.blocked, true, "blocked call is marked blocked")
     assertEqual(blockedCall.forwarded, false, "blocked call is not marked forwarded")
 
     eventModel:SetBlocked(false)
-    directWrappers[classMethods.RemoteEvent.FireServer](event, "retained")
+    namecallWrapper(event, "retained")
     assertEqual(#eventModel.Logs, 2, "RemoteSpy applies configured retention bound")
     assertEqual(RemoteSpy.Diagnostics.LogsDropped, 1, "retention eviction diagnosed")
 

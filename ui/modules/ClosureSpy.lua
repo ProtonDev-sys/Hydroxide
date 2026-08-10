@@ -503,7 +503,7 @@ updateCallInspector = function()
 		or (call.forwarded and "forwarded")
 		or "captured"
 	local duration = type(call.durationMs) == "number" and ("%.2f ms"):format(call.durationMs) or "no timing"
-	local status = ("closure • %d args • %s • %s"):format(argCount, state, duration)
+	local status = ("closure | %d args | %s | %s"):format(argCount, state, duration)
 
 	callInspector:SetStatus(status, caller)
 	callInspector:SetEnabled("Arguments", true)
