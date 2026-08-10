@@ -513,7 +513,7 @@ local function describeCallStack(callInfo)
 			)
 
 			if index < #stack then
-				lines[#lines + 1] = "    ↓"
+				lines[#lines + 1] = "    ->"
 			end
 		else
 			lines[#lines + 1] = ("%02d  %s"):format(index, tostring(frame))
