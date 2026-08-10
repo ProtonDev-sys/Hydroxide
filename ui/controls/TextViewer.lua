@@ -257,6 +257,13 @@ function TextViewer.Show(title, text, options)
 	options = type(options) == "table" and options or {}
 	text = tostring(text or "")
 
+	local settings = oh and oh.Settings or {}
+	local maxBytes = tonumber(options.MaxBytes or settings.MaxInspectorBytes or settings.maxInspectorBytes) or 524288
+
+	if maxBytes > 0 and #text > maxBytes then
+		text = text:sub(1, maxBytes) .. ("\n\n-- ... inspector output truncated at %d bytes ..."):format(maxBytes)
+	end
+
 	local current = ensureViewer(options.Parent)
 	current.Title.Text = tostring(title or "Inspector")
 	current.TextBox.Text = text
