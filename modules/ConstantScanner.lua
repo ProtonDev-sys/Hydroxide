@@ -3,18 +3,20 @@ local Closure = import("objects/Closure")
 local Constant = import("objects/Constant")
 
 local requiredMethods = {
-    ["getGc"] = true,
+    ["getLuaClosures"] = true,
     ["getInfo"] = true,
-    ["isXClosure"] = true,
-    ["isLClosure"] = true,
     ["getConstant"] = true,
     ["setConstant"] = true,
     ["getConstants"] = true
 }
 
-local function compareConstant(query, constant)
+local function getClosureName(closure)
+    local ran, info = pcall(getInfo, closure, "n")
+    return ran and info and info.name or ""
+end
+
+local function compareConstant(query, loweredQuery, constant)
     local constantType = type(constant)
-    local loweredQuery = query:lower()
 
     if constantType == "string" then
         return query == constant or constant:lower():find(loweredQuery, 1, true) ~= nil
@@ -23,7 +25,7 @@ local function compareConstant(query, constant)
     elseif constantType == "userdata" then
         return toString(constant) == query
     elseif constantType == "function" then
-        local closureName = getInfo(constant).name or ""
+        local closureName = getClosureName(constant)
         return query == closureName or closureName:lower():find(loweredQuery, 1, true) ~= nil
     end
 
@@ -32,11 +34,15 @@ end
 
 local function scan(query)
     local constants = {}
+    query = query or ""
+    local loweredQuery = query:lower()
 
-    for _, closure in pairs(getGc()) do
-        if type(closure) == "function" and not isXClosure(closure) and isLClosure(closure) and not constants[closure] then
-            for index, constant in pairs(getConstants(closure)) do
-                if compareConstant(query, constant) then
+    for _, closure in pairs(getLuaClosures()) do
+        local ran, closureConstants = pcall(getConstants, closure)
+
+        if ran and type(closureConstants) == "table" then
+            for index, constant in pairs(closureConstants) do
+                if compareConstant(query, loweredQuery, constant) then
                     local storage = constants[closure]
 
                     if not storage then

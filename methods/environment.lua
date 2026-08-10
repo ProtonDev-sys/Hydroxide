@@ -35,17 +35,27 @@ local function secureCall(closure, ...)
 
     local env = getfenv(1)
     local renv = getrenv and getrenv() or env
-    local results
+    local arguments = table.pack(...)
 
     setfenv(1, setmetatable({ script = script }, {
         __index = renv
     }))
 
-    results = (syn and syn.secure_call and control and { syn.secure_call(closure, control, ...) }) or { closure(...) }
+    local results = table.pack(pcall(function()
+        if syn and syn.secure_call and control then
+            return syn.secure_call(closure, control, table.unpack(arguments, 1, arguments.n))
+        end
+
+        return closure(table.unpack(arguments, 1, arguments.n))
+    end))
 
     setfenv(1, env)
 
-    return unpack(results)
+    if not results[1] then
+        error(results[2], 0)
+    end
+
+    return table.unpack(results, 2, results.n)
 end
 
 methods.safeGetEnv = safeGetEnv

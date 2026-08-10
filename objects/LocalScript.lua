@@ -1,13 +1,17 @@
 local LocalScript = {}
 
-function LocalScript.new(instance)
+function LocalScript.new(instance, closure, scriptEnvironment)
     local localScript = {}
-    local closure = getScriptClosure(instance)
+    closure = closure or getScriptClosure(instance)
 
     localScript.Instance = instance
-    localScript.Environment = getSenv(instance)
-    localScript.Constants = getConstants(closure)
-    localScript.Protos = getProtos(closure)
+    localScript.Environment = scriptEnvironment or getSenv(instance)
+
+    local constantsRan, constants = pcall(getConstants, closure)
+    local protosRan, protos = pcall(getProtos, closure)
+
+    localScript.Constants = constantsRan and constants or {}
+    localScript.Protos = protosRan and protos or {}
 
     return localScript
 end

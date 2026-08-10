@@ -128,8 +128,13 @@ local cyclic = {}
 cyclic.self = cyclic
 
 assertEqual(userdataValue(numberRange), "NumberRange.new(1, 25)", "NumberRange serialization")
-assertEqual(userdataValue(dateTime), "DateTime.fromUnixTimestampMillis(1700000000123)", "DateTime serialization")
+assertEqual(
+    userdataValue(dateTime),
+    "DateTime.fromUnixTimestampMillis(" .. tostring(dateTime.UnixTimestampMillis) .. ")",
+    "DateTime serialization"
+)
 assertEqual(dataToString(fakeBuffer), 'buffer.fromstring("A\\0B")', "buffer serialization")
+assertEqual(toUnicode(string.char(0xC3, 0xA9)), "utf8.char(233)", "unicode serialization")
 assertEqual(getInstancePath(destroyedInstance), '.Ghost --[[ PARENTED TO NIL OR DESTROYED ]]', "destroyed instance path")
 assertContains(tableToString(cyclic), "OH_CYCLIC_PROTECTION", "cyclic table protection")
 

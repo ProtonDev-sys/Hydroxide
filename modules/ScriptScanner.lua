@@ -2,32 +2,33 @@ local ScriptScanner = {}
 local LocalScript = import("objects/LocalScript")
 
 local requiredMethods = {
-    ["getGc"] = true,
+    ["getRunningScripts"] = true,
     ["getSenv"] = true,
     ["getProtos"] = true,
     ["getConstants"] = true,
-    ["getScriptClosure"] = true,
-    ["isXClosure"] = true
+    ["getScriptClosure"] = true
 }
 
 local function scan(query)
     local scripts = {}
     query = (query or ""):lower()
+    local ran, runningScripts = pcall(getRunningScripts)
 
-    for _, closure in pairs(getGc()) do
-        if type(closure) == "function" and not isXClosure(closure) then
-            local script = safeGetClosureScript and safeGetClosureScript(closure)
+    if not ran or type(runningScripts) ~= "table" then
+        return scripts
+    end
 
-            if typeof(script) == "Instance" and
-                not scripts[script] and
-                script:IsA("LocalScript") and
-                script.Name:lower():find(query, 1, true) and
-                getScriptClosure(script) and
-                pcall(function()
-                    return getSenv(script)
-                end)
-            then
-                scripts[script] = LocalScript.new(script)
+    for _, script in pairs(runningScripts) do
+        if typeof(script) == "Instance"
+            and not scripts[script]
+            and script:IsA("LocalScript")
+            and script.Name:lower():find(query, 1, true)
+        then
+            local closureRan, closure = pcall(getScriptClosure, script)
+            local environmentRan, scriptEnvironment = pcall(getSenv, script)
+
+            if closureRan and closure and environmentRan and type(scriptEnvironment) == "table" then
+                scripts[script] = LocalScript.new(script, closure, scriptEnvironment)
             end
         end
     end

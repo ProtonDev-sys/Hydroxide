@@ -1,37 +1,43 @@
 ## Script
 ```lua
 local owner = "ProtonDev-sys"
+local repository = "Hydroxide"
 local branch = "revision"
 
-local function httpGet(url)
-    if request then
-        local response = request({ Url = url, Method = "GET" })
-        if response and response.Success then
-            return response.Body
-        end
-    end
+getgenv().HydroxideConfig = {
+    owner = owner,
+    repository = repository,
+    branch = branch
+}
 
-    local ok, result = pcall(function()
-        return game:HttpGet(url)
-    end)
-
-    if ok then
-        return result
-    end
-
-    return game:HttpGetAsync(url)
-end
+local baseUrl = ("https://raw.githubusercontent.com/%s/%s/%s/"):format(owner, repository, branch)
 
 local function webImport(file)
-    return loadstring(httpGet(("https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"):format(owner, branch, file)), file .. ".lua")()
+    local source = httpget(baseUrl .. file .. ".lua")
+    local chunk, compileError = loadstring(source, file .. ".lua")
+
+    assert(chunk, compileError)
+    return chunk()
 end
 
 webImport("init")
-webImport("ui/main")
+getgenv().import("ui/main")
 ```
 
-## Compatibility
-Volt's documented function surface is the canonical target for this fork. Volt-specific hooks such as `oth` are preferred when present, legacy alias paths are kept for fallback executors, and `__namecall` interception is only used as a fallback when direct hooks are unavailable.
+## Potassium compatibility
+
+This fork targets the current [Potassium API reference](https://docs.potassium.pro/) and keeps legacy aliases only as fallbacks. The runtime uses Potassium's documented APIs directly:
+
+* `filtergc` narrows scanner work to non-executor Lua closures instead of walking every GC object.
+* `getrunningscripts` powers Script Scanner without a GC scan.
+* `oth.hook`, `oth.get_root_callback`, `oth.get_original_thread`, and `oth.unhook(target)` are used for direct C-function hooks when available.
+* `getscriptfromthread` preserves calling-script attribution for off-thread hooks.
+* `restorefunction` and documented `Connection:Enable()` teardown restore hooks and temporarily disabled error connections.
+* `getthreadidentity` and `setthreadidentity` replace legacy thread-context names internally.
+
+Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
+
+The loader defaults to `ProtonDev-sys/Hydroxide` on `revision`. Override `owner`, `repository`, or `branch` in `HydroxideConfig` when testing another fork or commit.
 
 # Hydroxide
 <i>Lua runtime introspection and network capturing tool for games on the Roblox engine.</i>
@@ -56,12 +62,12 @@ Volt's documented function surface is the canonical target for this fork. Volt-s
     * View information of closure
 * Script Scanner
     * View general information of scripts (source, protos, constants, etc.)
-    * Retrieve all protos found in GC
+    * Retrieve protos from running LocalScripts
 * Module Scanner
     * View general information of modules (return value, source, protos, constants, etc.)
-    * Retrieve all protos found in GC
+    * Retrieve protos from loaded ModuleScripts
 * RemoteSpy
-    * Log calls of remote objects (RemoteEvent, RemoteFunction, BindableEvent, BindableFunction)
+    * Log calls of remote objects (RemoteEvent, UnreliableRemoteEvent, RemoteFunction, BindableEvent, BindableFunction)
     * Ignore/Block calls based on parameters passed
     * Traceback calling function/closure
 * ClosureSpy
@@ -74,4 +80,3 @@ More to come, soon.
 <p align="center">
     <img src="https://i.gyazo.com/63afdd764cdca533af5ebca843217a7e.gif" />
 </p>
-

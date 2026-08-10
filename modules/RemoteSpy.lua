@@ -2,11 +2,8 @@ local RemoteSpy = {}
 local Remote = import("objects/Remote")
 
 local requiredMethods = {
-    ["checkCaller"] = true,
     ["getInfo"] = true,
-    ["getMetatable"] = true,
-    ["setClipboard"] = true,
-    ["getCallingScript"] = true
+    ["setClipboard"] = true
 }
 
 local remoteMethods = {
@@ -28,14 +25,22 @@ local currentRemotes = {}
 local remoteDataEvent = Instance.new("BindableEvent")
 local eventSet = false
 
+oh.Instances[#oh.Instances + 1] = remoteDataEvent
+
 local function normalizeMethod(method)
-    if method == "fireServer" then
+    if type(method) ~= "string" then
+        return method
+    end
+
+    local lowered = method:lower()
+
+    if lowered == "fireserver" then
         return "FireServer"
-    elseif method == "invokeServer" then
+    elseif lowered == "invokeserver" then
         return "InvokeServer"
-    elseif method == "fire" then
+    elseif lowered == "fire" then
         return "Fire"
-    elseif method == "invoke" then
+    elseif lowered == "invoke" then
         return "Invoke"
     end
 
@@ -43,11 +48,11 @@ local function normalizeMethod(method)
 end
 
 local function connectEvent(callback)
-    remoteDataEvent.Event:Connect(callback)
+    local connection = remoteDataEvent.Event:Connect(callback)
 
-    if not eventSet then
-        eventSet = true
-    end
+    oh.Events[#oh.Events + 1] = connection
+    eventSet = true
+    return connection
 end
 
 local function ensureRemote(instance)
@@ -61,18 +66,60 @@ local function ensureRemote(instance)
     return remote
 end
 
-local function buildCall(stackLevel, vargs)
-    local info = getInfo and getInfo(stackLevel)
+local function safeCheckCaller()
+    if not checkCaller then
+        return false
+    end
+
+    return checkCaller() == true
+end
+
+local function safeCallingScript()
+    if not getCallingScript then
+        return nil
+    end
+
+    local ran, result = pcall(getCallingScript)
+    return ran and result or nil
+end
+
+local function callingScriptFromOriginalThread()
+    if not (othGetOriginalThread and getScriptFromThread) then
+        return nil
+    end
+
+    local threadRan, originalThread = pcall(othGetOriginalThread)
+
+    if not threadRan or not originalThread then
+        return nil
+    end
+
+    local scriptRan, script = pcall(getScriptFromThread, originalThread)
+    return scriptRan and script or nil
+end
+
+local function buildCall(stackLevel, vargs, callingScript, callingScriptResolved)
+    local info
+    local script = callingScript
+
+    if getInfo then
+        local ran, result = pcall(getInfo, stackLevel, "f")
+        info = ran and result or nil
+    end
+
+    if not callingScriptResolved then
+        script = safeCallingScript()
+    end
 
     return {
-        script = getCallingScript((PROTOSMASHER_LOADED ~= nil and stackLevel - 1) or nil),
+        script = script,
         args = vargs,
         func = info and info.func
     }
 end
 
-local function processRemoteCall(instance, method, stackLevel, vargs)
-    if typeof(instance) ~= "Instance" then
+local function processRemoteCall(instance, method, stackLevel, vargs, callingScript, callingScriptResolved)
+    if typeof(instance) ~= "Instance" or (not callingScriptResolved and safeCheckCaller()) then
         return false
     end
 
@@ -83,30 +130,35 @@ local function processRemoteCall(instance, method, stackLevel, vargs)
     end
 
     local remote = ensureRemote(instance)
-    local remoteIgnored = remote.Ignored
-    local remoteBlocked = remote.Blocked
-    local argsIgnored = remote:AreArgsIgnored(vargs)
-    local argsBlocked = remote:AreArgsBlocked(vargs)
+    local argsIgnored = next(remote.IgnoredArgs) ~= nil and remote:AreArgsIgnored(vargs)
+    local argsBlocked = next(remote.BlockedArgs) ~= nil and remote:AreArgsBlocked(vargs)
 
-    if eventSet and not remoteIgnored and not argsIgnored then
-        local call = buildCall(stackLevel, vargs)
+    if eventSet and not remote.Ignored and not argsIgnored then
+        local call = buildCall(stackLevel, vargs, callingScript, callingScriptResolved)
 
         remote:IncrementCalls(call)
         remoteDataEvent:Fire(instance, call)
     end
 
-    return remoteBlocked or argsBlocked
+    return remote.Blocked or argsBlocked
 end
 
-local function createHookCallback(target, targetMethod)
-    return function(original, ...)
+local function createHookCallback(targetMethod)
+    return function(original, callingScript, callingScriptResolved, ...)
         local instance = ...
 
         if typeof(instance) ~= "Instance" then
             return original(...)
         end
 
-        local blocked = processRemoteCall(instance, targetMethod, 3, { select(2, ...) })
+        local blocked = processRemoteCall(
+            instance,
+            targetMethod,
+            3,
+            { select(2, ...) },
+            callingScript,
+            callingScriptResolved
+        )
 
         if blocked then
             return
@@ -117,20 +169,23 @@ local function createHookCallback(target, targetMethod)
 end
 
 local function installDirectHook(target, callback)
-    if othHook and othGetRootCallback then
-        local handle
-        local ran = pcall(function()
-            handle = othHook(target, function(...)
-                local original = othGetRootCallback() or target
-                return callback(original, ...)
-            end)
+    if othHook and othGetRootCallback and othUnhook then
+        local ran = pcall(othHook, target, function(...)
+            local original = othGetRootCallback()
+
+            if not original then
+                return
+            end
+
+            return callback(original, callingScriptFromOriginalThread(), true, ...)
         end)
 
-        if ran and handle then
-            table.insert(oh.Hooks, {
+        if ran then
+            oh.Hooks[#oh.Hooks + 1] = {
                 Kind = "oth",
-                Handle = handle
-            })
+                Target = target,
+                Active = true
+            }
 
             return true
         end
@@ -141,18 +196,23 @@ local function installDirectHook(target, callback)
     end
 
     local original
-    local wrapper = newCClosure and newCClosure(function(...)
-        return callback(original, ...)
-    end) or function(...)
-        return callback(original, ...)
+    local callbackWrapper = function(...)
+        return callback(original, nil, false, ...)
+    end
+    local wrapper = newCClosure and newCClosure(callbackWrapper) or callbackWrapper
+    local ran, result = pcall(hookFunction, target, wrapper)
+
+    if not ran or type(result) ~= "function" then
+        return false
     end
 
-    original = hookFunction(target, wrapper)
-    table.insert(oh.Hooks, {
+    original = result
+    oh.Hooks[#oh.Hooks + 1] = {
         Kind = "function",
         Target = target,
-        Original = original
-    })
+        Original = original,
+        Active = true
+    }
 
     return true
 end
@@ -164,16 +224,17 @@ local function createHookTarget(className, methodName)
         return nil
     end
 
-    local target = instance[methodName]
+    local targetRan, target = pcall(function()
+        return instance[methodName]
+    end)
 
     pcall(function()
         instance:Destroy()
     end)
 
-    return target
+    return targetRan and target or nil
 end
 
-local installedDirectHook = false
 local directTargets = {
     { "RemoteEvent", "FireServer" },
     { "UnreliableRemoteEvent", "FireServer" },
@@ -181,6 +242,9 @@ local directTargets = {
     { "BindableEvent", "Fire" },
     { "BindableFunction", "Invoke" }
 }
+local targetGroups = {}
+local directHookedClasses = {}
+local installedDirectHook = false
 
 for _, hookInfo in ipairs(directTargets) do
     local className = hookInfo[1]
@@ -188,21 +252,49 @@ for _, hookInfo in ipairs(directTargets) do
     local target = createHookTarget(className, methodName)
 
     if target then
-        local callback = createHookCallback(target, methodName)
+        local group = targetGroups[target]
 
-        if installDirectHook(target, callback) then
-            installedDirectHook = true
+        if not group then
+            group = {
+                Method = methodName,
+                Classes = {}
+            }
+            targetGroups[target] = group
+        end
+
+        group.Classes[className] = true
+    end
+end
+
+for target, group in pairs(targetGroups) do
+    if installDirectHook(target, createHookCallback(group.Method)) then
+        installedDirectHook = true
+
+        for className in pairs(group.Classes) do
+            directHookedClasses[className] = true
         end
     end
 end
 
-if not installedDirectHook and hookMetaMethod and getNamecallMethod then
-    local originalNamecall
+local needsNamecallFallback = false
 
-    originalNamecall = hookMetaMethod(game, "__namecall", function(...)
+for _, hookInfo in ipairs(directTargets) do
+    if not directHookedClasses[hookInfo[1]] then
+        needsNamecallFallback = true
+        break
+    end
+end
+
+local installedNamecallHook = false
+
+if needsNamecallFallback and hookMetaMethod and getNamecallMethod then
+    local metatable = getMetatable and getMetatable(game)
+    local target = metatable and metatable.__namecall
+    local originalNamecall
+    local callback = function(...)
         local instance = ...
 
-        if typeof(instance) ~= "Instance" then
+        if typeof(instance) ~= "Instance" or directHookedClasses[instance.ClassName] then
             return originalNamecall(...)
         end
 
@@ -213,12 +305,27 @@ if not installedDirectHook and hookMetaMethod and getNamecallMethod then
         end
 
         return originalNamecall(...)
-    end)
+    end
+    local wrapper = newCClosure and newCClosure(callback) or callback
+    local ran, original = pcall(hookMetaMethod, game, "__namecall", wrapper)
+
+    if ran and type(original) == "function" then
+        originalNamecall = original
+        installedNamecallHook = true
+        oh.Hooks[#oh.Hooks + 1] = {
+            Kind = "metamethod",
+            Target = target,
+            Object = game,
+            Method = "__namecall",
+            Original = original,
+            Active = true
+        }
+    end
 end
 
 RemoteSpy.RemotesViewing = remotesViewing
 RemoteSpy.CurrentRemotes = currentRemotes
 RemoteSpy.ConnectEvent = connectEvent
 RemoteSpy.RequiredMethods = requiredMethods
-RemoteSpy.IsSupported = installedDirectHook or (hookMetaMethod and getNamecallMethod) or false
+RemoteSpy.IsSupported = installedDirectHook or installedNamecallHook
 return RemoteSpy

@@ -1,6 +1,7 @@
 local aux = {}
 
 local getGc = getgc
+local filterGc = filtergc
 local getInfo = debug.getinfo or getinfo
 local getUpvalue = debug.getupvalue or getupvalue or getupval
 local getConstants = debug.getconstants or getconstants or getconsts
@@ -41,7 +42,11 @@ local function matchConstants(closure, list)
         return true
     end
 
-    local constants = getConstants(closure)
+    local ran, constants = pcall(getConstants, closure)
+
+    if not ran or type(constants) ~= "table" then
+        return false
+    end
 
     for index, value in pairs(list) do
         if constants[index] ~= value and value ~= placeholderUserdataConstant then
@@ -52,8 +57,41 @@ local function matchConstants(closure, list)
     return true
 end
 
+local function getLuaClosures()
+    if filterGc then
+        local ran, closures = pcall(filterGc, "function", {
+            IgnoreExecutor = true
+        }, false)
+
+        if ran and type(closures) == "table" then
+            local filtered = {}
+
+            for _, closure in pairs(closures) do
+                if not isLClosure or isLClosure(closure) then
+                    filtered[#filtered + 1] = closure
+                end
+            end
+
+            return filtered
+        end
+    end
+
+    local closures = {}
+
+    for _, object in pairs(getGc(false)) do
+        if type(object) == "function"
+            and (not isLClosure or isLClosure(object))
+            and not isXClosure(object)
+        then
+            closures[#closures + 1] = object
+        end
+    end
+
+    return closures
+end
+
 local function searchClosure(script, name, upvalueIndex, constants)
-    for _, closure in pairs(getGc()) do
+    for _, closure in pairs(getLuaClosures()) do
         local parentScript = safeGetClosureScript(closure)
         local matchesScript = script == parentScript
 
@@ -61,13 +99,9 @@ local function searchClosure(script, name, upvalueIndex, constants)
             matchesScript = parentScript == nil or parentScript.Parent == nil
         end
 
-        if type(closure) == "function" and
-            isLClosure(closure) and
-            not isXClosure(closure) and
-            matchesScript and
-            pcall(getUpvalue, closure, upvalueIndex)
-        then
-            local closureName = getInfo(closure).name
+        if matchesScript and pcall(getUpvalue, closure, upvalueIndex) then
+            local infoRan, info = pcall(getInfo, closure, "n")
+            local closureName = infoRan and info and info.name or ""
 
             if ((name and name ~= "Unnamed function") and closureName == name) and matchConstants(closure, constants) then
                 return closure

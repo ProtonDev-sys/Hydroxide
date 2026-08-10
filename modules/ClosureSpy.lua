@@ -7,97 +7,131 @@ local requiredMethods = {
     ["getProtos"] = true,
     ["getUpvalues"] = true,
     ["getUpvalue"] = true,
-    ["getContext"] = true,
-    ["setContext"] = true,
+    ["withThreadIdentity"] = true,
     ["setUpvalue"] = true,
     ["getConstants"] = true,
     ["getConstant"] = true,
     ["setConstant"] = true,
-    ["getInfo"] = true,
-    ["getCallingScript"] = true
+    ["getInfo"] = true
 }
 
 local eventCallback
+local Hook = {}
+local hookMap = {}
 
-function log(hook, callingScript, ...)
-    local vargs = { ... }
-
-    if eventCallback and not hook:AreArgsIgnored(vargs) then
-        local call = {
-            script = callingScript,
-            args = vargs
-        }
-
-        eventCallback(hook, call)
+local function safeCallingScript()
+    if not getCallingScript then
+        return nil
     end
+
+    local ran, result = pcall(getCallingScript)
+    return ran and result or nil
 end
 
 local function setEvent(callback)
-    if not eventCallback then
-        eventCallback = callback
-    end
+    eventCallback = callback
 end
 
-local Hook = {}
-local hookMap = {}
-hookCache = {}
+local function emitCall(hook, vargs)
+    if not eventCallback
+        or hook.Ignored
+        or (next(hook.IgnoredArgs) ~= nil and hook:AreArgsIgnored(vargs))
+    then
+        return
+    end
+
+    pcall(eventCallback, hook, {
+        script = safeCallingScript(),
+        args = vargs
+    })
+end
 
 function Hook.new(closure)
-    local hook = {}
-    local data = closure.Data
+    local target = closure.Data
 
-    if getInfo(data).nups < 1 then
-        return
-    elseif hookCache[data] then
+    if hookMap[target] then
         return false
     end
 
-    local wrap = { hook, data }
-    hookCache[data] = hookFunction(data, function(...)
-        local vargs = { ... }
-        local storedHook = wrap[1]
-        local originalData = wrap[2]
+    if type(target) ~= "function" or not isLClosure(target) then
+        return nil, "Only Lua closures can be spied"
+    end
 
-        if not storedHook.Ignored and not storedHook:AreArgsIgnored(vargs) then
-            log(storedHook, getCallingScript(), ...)
-        end
+    local hook = {
+        Closure = closure,
+        Target = target,
+        Calls = 0,
+        Logs = {},
+        Ignored = false,
+        Blocked = false,
+        BlockedArgs = {},
+        IgnoredArgs = {}
+    }
 
-        if not storedHook.Blocked and not storedHook:AreArgsBlocked(vargs) then
-            return hookCache[originalData](...)
-        end
-    end)
-
-    closure.Data = hookCache[data]
-
-    hook.Closure = closure
-    hook.Calls = 0
-    hook.Logs = {}
-    hook.Ignored = false
-    hook.Blocked = false
     hook.Ignore = Hook.ignore
     hook.Block = Hook.block
     hook.IgnoreArg = Hook.ignoreArg
     hook.BlockArg = Hook.blockArg
     hook.Remove = Hook.remove
     hook.Clear = Hook.clear
-    hook.BlockedArgs = {}
-    hook.IgnoredArgs = {}
     hook.AreArgsBlocked = Hook.areArgsBlocked
     hook.AreArgsIgnored = Hook.areArgsIgnored
     hook.IncrementCalls = Hook.incrementCalls
     hook.DecrementCalls = Hook.decrementCalls
 
-    hookMap[data] = hook
+    local original
+    local wrapper = newCClosure(function(...)
+        local vargs = { ... }
+
+        emitCall(hook, vargs)
+
+        if not hook.Blocked
+            and (next(hook.BlockedArgs) == nil or not hook:AreArgsBlocked(vargs))
+        then
+            return original(...)
+        end
+    end)
+    local ran, result = pcall(hookFunction, target, wrapper)
+
+    if not ran or type(result) ~= "function" then
+        return nil, ran and "hookfunction did not return the original closure" or tostring(result)
+    end
+
+    original = result
+    hook.Original = original
+    hook.Record = {
+        Kind = "function",
+        Target = target,
+        Original = original,
+        Active = true
+    }
+
+    closure.Data = original
+    hookMap[target] = hook
+    hookMap[original] = hook
+    oh.Hooks[#oh.Hooks + 1] = hook.Record
 
     return hook
 end
 
 function Hook.remove(hook)
-    hookMap[hook.Closure.Data] = nil
+    if hook.Record and hook.Record.Active ~= false then
+        local restored = restoreHook(hook.Record)
+
+        if not restored then
+            return false, "Unable to restore the original closure"
+        end
+    end
+
+    hookMap[hook.Target] = nil
+    hookMap[hook.Original] = nil
+    hook.Closure.Data = hook.Target
+    return true
 end
 
 function Hook.clear(hook)
     hook.Calls = 0
+    hook.Logs = {}
 end
 
 function Hook.block(hook)
@@ -108,89 +142,68 @@ function Hook.ignore(hook)
     hook.Ignored = not hook.Ignored
 end
 
-function Hook.blockArg(hook, index, value, byType)
-    local blockedArgs = hook.BlockedArgs
-    local blockedIndex = blockedArgs[index]
+local function addArgCondition(storage, index, value, byType)
+    local condition = storage[index]
 
-    if not blockedIndex then
-        blockedIndex = {
+    if not condition then
+        condition = {
             types = {},
             values = {}
         }
-        blockedArgs[index] = blockedIndex
+        storage[index] = condition
     end
 
     if byType then
-        blockedIndex.types[value] = true
+        condition.types[value] = true
     else
-        blockedIndex.values[value] = true
+        condition.values[value] = true
     end
+end
+
+function Hook.blockArg(hook, index, value, byType)
+    addArgCondition(hook.BlockedArgs, index, value, byType)
 end
 
 function Hook.ignoreArg(hook, index, value, byType)
-    local ignoredArgs = hook.IgnoredArgs
-    local ignoredIndex = ignoredArgs[index]
+    addArgCondition(hook.IgnoredArgs, index, value, byType)
+end
 
-    if not ignoredIndex then
-        ignoredIndex = {
-            types = {},
-            values = {}
-        }
+local function matchesArgCondition(storage, args)
+    for index, value in pairs(args) do
+        local condition = storage[index]
 
-        ignoredArgs[index] = ignoredIndex
+        if condition and (condition.types[typeof(value)] or condition.values[value] ~= nil) then
+            return true
+        end
     end
 
-    if byType then
-        ignoredIndex.types[value] = true
-    else
-        ignoredIndex.values[value] = true
-    end
+    return false
 end
 
 function Hook.areArgsBlocked(hook, args)
-    local blockedArgs = hook.BlockedArgs
-
-    for index, value in pairs(args) do
-        local indexBlock = blockedArgs[index]
-
-        if indexBlock and (indexBlock.types[typeof(value)] or indexBlock.values[value] ~= nil) then
-            return true
-        end
-    end
-
-    return false
+    return matchesArgCondition(hook.BlockedArgs, args)
 end
 
 function Hook.areArgsIgnored(hook, args)
-    local ignoredArgs = hook.IgnoredArgs
-
-    for index, value in pairs(args) do
-        local indexIgnore = ignoredArgs[index]
-
-        if indexIgnore and (indexIgnore.types[typeof(value)] or indexIgnore.values[value] ~= nil) then
-            return true
-        end
-    end
-
-    return false
+    return matchesArgCondition(hook.IgnoredArgs, args)
 end
 
-function Hook.incrementCalls(hook, vargs)
+function Hook.incrementCalls(hook, call)
     hook.Calls = hook.Calls + 1
-    table.insert(hook.Logs, vargs)
+    hook.Logs[#hook.Logs + 1] = call
 end
 
-function Hook.decrementCalls(hook, vargs)
-    local logs = hook.Logs
-    local index = table.find(logs, vargs)
+function Hook.decrementCalls(hook, call)
+    local index = table.find(hook.Logs, call)
 
     if index then
-        table.remove(logs, index)
+        table.remove(hook.Logs, index)
         hook.Calls = math.max(0, hook.Calls - 1)
     end
 end
 
 ClosureSpy.Hook = Hook
+ClosureSpy.CurrentClosures = hookMap
 ClosureSpy.SetEvent = setEvent
 ClosureSpy.RequiredMethods = requiredMethods
 return ClosureSpy

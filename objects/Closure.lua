@@ -29,7 +29,8 @@ function Closure.new(data)
     end
 
     local closure = {}
-    local info = getInfo(data)
+    local infoRan, info = pcall(getInfo, data, "n")
+    info = infoRan and info or nil
     local name = info and info.name or ""
 
     closure.Name = (name ~= "" and name) or "Unnamed function"

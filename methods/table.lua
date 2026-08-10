@@ -26,15 +26,15 @@ local function tableToString(data, root, indents, seen)
         end
 
         seen[data] = true
-        local head = "{\n"
+        local parts = { "{\n" }
         local elements = 0
         local indent = ("\t"):rep(indents)
 
         for index, value in pairs(data) do
             if index == root or value == root then
-                head = head .. ("%sOH_CYCLIC_PROTECTION,\n"):format(indent)
+                parts[#parts + 1] = ("%sOH_CYCLIC_PROTECTION,\n"):format(indent)
             else
-                head = head .. ("%s[%s] = %s,\n"):format(
+                parts[#parts + 1] = ("%s[%s] = %s,\n"):format(
                     indent,
                     tableToString(index, root or data, indents + 1, seen),
                     tableToString(value, root or data, indents + 1, seen)
@@ -47,7 +47,9 @@ local function tableToString(data, root, indents, seen)
         seen[data] = nil
 
         if elements > 0 then
-            return ("%s\n%s"):format(head:sub(1, -3), ("\t"):rep(indents - 1) .. "}")
+            parts[#parts] = parts[#parts]:sub(1, -3)
+            parts[#parts + 1] = "\n" .. ("\t"):rep(indents - 1) .. "}"
+            return table.concat(parts)
         end
 
         return "{}"
@@ -59,6 +61,12 @@ end
 local function compareTables(x, y)
     for index, value in pairs(x) do
         if value ~= y[index] then
+            return false
+        end
+    end
+
+    for index in pairs(y) do
+        if x[index] == nil then
             return false
         end
     end

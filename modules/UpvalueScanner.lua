@@ -3,17 +3,20 @@ local Closure = import("objects/Closure")
 local Upvalue = import("objects/Upvalue")
 
 local requiredMethods = {
-    ["getGc"] = true,
+    ["getLuaClosures"] = true,
     ["getInfo"] = true,
-    ["isXClosure"] = true,
     ["getUpvalue"] = true,
     ["setUpvalue"] = true,
     ["getUpvalues"] = true
 }
 
-local function compareUpvalue(query, upvalue, ignoreNumberMatch)
+local function getClosureName(closure)
+    local ran, info = pcall(getInfo, closure, "n")
+    return ran and info and info.name or ""
+end
+
+local function compareUpvalue(query, loweredQuery, upvalue, ignoreNumberMatch)
     local upvalueType = type(upvalue)
-    local loweredQuery = query:lower()
 
     if upvalueType == "string" then
         local loweredValue = upvalue:lower()
@@ -31,7 +34,7 @@ local function compareUpvalue(query, upvalue, ignoreNumberMatch)
 
         return toString(upvalue) == query
     elseif upvalueType == "function" then
-        local closureName = getInfo(upvalue).name or ""
+        local closureName = getClosureName(upvalue)
         local loweredName = closureName:lower()
 
         return query == closureName or loweredName:find(loweredQuery, 1, true) ~= nil
@@ -42,13 +45,17 @@ end
 
 local function scan(query, deepSearch)
     local upvalues = {}
+    query = query or ""
+    local loweredQuery = query:lower()
 
-    for _, closure in pairs(getGc()) do
-        if type(closure) == "function" and not isXClosure(closure) and not upvalues[closure] then
-            for index, value in pairs(getUpvalues(closure)) do
+    for _, closure in pairs(getLuaClosures()) do
+        local ran, closureUpvalues = pcall(getUpvalues, closure)
+
+        if ran and type(closureUpvalues) == "table" then
+            for index, value in pairs(closureUpvalues) do
                 local valueType = type(value)
 
-                if valueType ~= "table" and compareUpvalue(query, value) then
+                if valueType ~= "table" and compareUpvalue(query, loweredQuery, value) then
                     local storage = upvalues[closure]
 
                     if not storage then
@@ -62,7 +69,12 @@ local function scan(query, deepSearch)
                     local tableUpvalue
 
                     for key, nestedValue in pairs(value) do
-                        if (key ~= value and nestedValue ~= value) and (compareUpvalue(query, key, true) or compareUpvalue(query, nestedValue)) then
+                        if (key ~= value and nestedValue ~= value)
+                            and (
+                                compareUpvalue(query, loweredQuery, key, true)
+                                or compareUpvalue(query, loweredQuery, nestedValue)
+                            )
+                        then
                             if not storage then
                                 storage = Closure.new(closure)
                                 upvalues[closure] = storage

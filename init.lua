@@ -1,15 +1,22 @@
 local environment = assert(getgenv, "<OH> ~ Your exploit is not supported")()
+local previousRuntime = environment.oh
 
-if oh then
-    oh.Exit()
+if previousRuntime and type(previousRuntime.Exit) == "function" then
+    pcall(previousRuntime.Exit)
 end
 
 local HttpService = game:GetService("HttpService")
 
-local web = true
-local user = "ProtonDev-sys"
-local branch = "revision"
+local config = type(environment.HydroxideConfig) == "table" and environment.HydroxideConfig or {}
+local web = config.web ~= false
+local user = config.owner or "ProtonDev-sys"
+local repository = config.repository or "Hydroxide"
+local branch = config.branch or "revision"
 local importCache = {}
+local pack = table.pack or function(...)
+    return { n = select("#", ...), ... }
+end
+local unpackValues = table.unpack or unpack
 
 local function pick(...)
     for index = 1, select("#", ...) do
@@ -40,23 +47,25 @@ local function useMethods(module)
 end
 
 local function makeSetReadOnly()
-    return pick(
-        setreadonly,
-        function(target, readonly)
+    if setreadonly then
+        return setreadonly
+    elseif makereadonly and makewritable then
+        return function(target, readonly)
             if readonly and makereadonly then
                 return makereadonly(target)
             elseif not readonly and makewritable then
                 return makewritable(target)
             end
-        end,
-        function(target, readonly)
+        end
+    elseif make_readonly and make_writeable then
+        return function(target, readonly)
             if readonly and make_readonly then
                 return make_readonly(target)
             elseif not readonly and make_writeable then
                 return make_writeable(target)
             end
         end
-    )
+    end
 end
 
 local function makeIsLClosure()
@@ -93,17 +102,30 @@ local function makeHookMetaMethod(getMetatable)
 end
 
 local rawGetMetatable = pick(getrawmetatable, debug.getmetatable)
+local othLibrary = pick(environment.oth, oth)
+local httpLibrary = pick(environment.http, http)
 local canonicalMethods = {
     checkcaller = pick(checkcaller, environment.checkcaller),
     newcclosure = pick(newcclosure, environment.newcclosure),
     hookfunction = pick(hookfunction, detour_function, environment.hookfunction),
+    restorefunction = pick(restorefunction, environment.restorefunction),
+    filtergc = pick(filtergc, environment.filtergc),
     getgc = pick(getgc, get_gc_objects, environment.getgc),
     getinfo = pick(debug.getinfo, getinfo),
     getsenv = pick(getsenv, environment.getsenv),
-    getmenv = pick(getmenv, getsenv),
-    getthreadcontext = pick(getthreadcontext, get_thread_context, syn and syn.get_thread_identity),
+    getmenv = pick(getsenv, getmenv),
+    getthreadidentity = pick(
+        getthreadidentity,
+        getidentity,
+        getthreadcontext,
+        get_thread_identity,
+        get_thread_context,
+        syn and syn.get_thread_identity
+    ),
     getconnections = pick(getconnections, get_signal_cons),
     getscriptclosure = pick(getscriptclosure, get_script_function),
+    getscriptfromthread = pick(getscriptfromthread, environment.getscriptfromthread),
+    getrunningscripts = pick(getrunningscripts, environment.getrunningscripts),
     getnamecallmethod = pick(getnamecallmethod, get_namecall_method),
     getcallingscript = pick(getcallingscript, get_calling_script),
     getloadedmodules = pick(getloadedmodules, get_loaded_modules),
@@ -118,7 +140,14 @@ local canonicalMethods = {
     gethui = pick(gethui, get_hidden_gui),
     setclipboard = pick(setclipboard, writeclipboard),
     setconstant = pick(debug.setconstant, setconstant, setconst),
-    setthreadcontext = pick(setthreadcontext, set_thread_context, syn and syn.set_thread_identity),
+    setthreadidentity = pick(
+        setthreadidentity,
+        setidentity,
+        setthreadcontext,
+        set_thread_identity,
+        set_thread_context,
+        syn and syn.set_thread_identity
+    ),
     setupvalue = pick(debug.setupvalue, setupvalue, setupval),
     setstack = pick(debug.setstack, setstack),
     setreadonly = makeSetReadOnly(),
@@ -140,17 +169,16 @@ local canonicalMethods = {
     makefolder = makefolder,
     isfolder = isfolder,
     isfile = isfile,
-    request = pick(request, http_request, syn and syn.request),
-    oth_hook = environment.oth and environment.oth.hook or (oth and oth.hook),
-    oth_unhook = environment.oth and environment.oth.unhook or (oth and oth.unhook),
-    oth_get_root_callback = environment.oth and environment.oth.get_root_callback or (oth and oth.get_root_callback)
+    httpget = pick(httpget, environment.httpget, environment.HttpGet),
+    request = pick(request, http_request, httpLibrary and httpLibrary.request, syn and syn.request),
+    identifyexecutor = pick(identifyexecutor, getexecutorname),
+    oth_hook = othLibrary and othLibrary.hook,
+    oth_unhook = othLibrary and othLibrary.unhook,
+    oth_get_root_callback = othLibrary and othLibrary.get_root_callback,
+    oth_get_original_thread = othLibrary and othLibrary.get_original_thread
 }
 
 canonicalMethods.hookmetamethod = makeHookMetaMethod(canonicalMethods.getrawmetatable)
-
-if Window and PROTOSMASHER_LOADED then
-    getgenv().get_script_function = nil
-end
 
 local function getConstantCompat(closure, index)
     local target = type(closure) == "table" and closure.Data or closure
@@ -195,29 +223,126 @@ local function getConstantsCompat(closure)
     return {}
 end
 
-local function getThreadContextCompat(...)
-    if canonicalMethods.getthreadcontext then
-        return canonicalMethods.getthreadcontext(...)
+local function getThreadIdentityCompat()
+    if canonicalMethods.getthreadidentity then
+        return canonicalMethods.getthreadidentity()
     end
 end
 
-local function setThreadContextCompat(...)
-    if canonicalMethods.setthreadcontext then
-        return canonicalMethods.setthreadcontext(...)
+local function setThreadIdentityCompat(identity)
+    if canonicalMethods.setthreadidentity then
+        return canonicalMethods.setthreadidentity(identity)
     end
+end
+
+local function withThreadIdentityCompat(identity, callback, ...)
+    if not (canonicalMethods.getthreadidentity and canonicalMethods.setthreadidentity) then
+        return callback(...)
+    end
+
+    local oldIdentity = getThreadIdentityCompat()
+
+    if oldIdentity == nil then
+        return callback(...)
+    end
+
+    local arguments = pack(...)
+    setThreadIdentityCompat(identity)
+
+    local results = pack(pcall(function()
+        return callback(unpackValues(arguments, 1, arguments.n))
+    end))
+
+    pcall(setThreadIdentityCompat, oldIdentity)
+
+    if not results[1] then
+        error(results[2], 0)
+    end
+
+    return unpackValues(results, 2, results.n)
+end
+
+local function getLuaClosuresCompat()
+    if canonicalMethods.filtergc then
+        local ran, closures = pcall(canonicalMethods.filtergc, "function", {
+            IgnoreExecutor = true
+        }, false)
+
+        if ran and type(closures) == "table" then
+            if not canonicalMethods.islclosure then
+                return closures
+            end
+
+            local filtered = {}
+
+            for _, closure in pairs(closures) do
+                if canonicalMethods.islclosure(closure) then
+                    filtered[#filtered + 1] = closure
+                end
+            end
+
+            return filtered
+        end
+    end
+
+    local closures = {}
+    local objects = canonicalMethods.getgc and canonicalMethods.getgc(false) or {}
+
+    for _, object in pairs(objects) do
+        if type(object) == "function"
+            and (not canonicalMethods.islclosure or canonicalMethods.islclosure(object))
+            and (not canonicalMethods.isexecutorclosure or not canonicalMethods.isexecutorclosure(object))
+        then
+            closures[#closures + 1] = object
+        end
+    end
+
+    return closures
+end
+
+local function getRunningScriptsCompat()
+    if canonicalMethods.getrunningscripts then
+        local ran, scripts = pcall(canonicalMethods.getrunningscripts)
+
+        if ran and type(scripts) == "table" then
+            return scripts
+        end
+    end
+
+    local scripts = {}
+    local seen = {}
+
+    for _, closure in pairs(getLuaClosuresCompat()) do
+        if type(getfenv) == "function" then
+            local ran, closureEnvironment = pcall(getfenv, closure)
+            local script = ran and type(closureEnvironment) == "table" and rawget(closureEnvironment, "script")
+
+            if typeof(script) == "Instance" and not seen[script] then
+                seen[script] = true
+                scripts[#scripts + 1] = script
+            end
+        end
+    end
+
+    return scripts
 end
 
 local globalMethods = {
     checkcaller = canonicalMethods.checkcaller,
     newcclosure = canonicalMethods.newcclosure,
     hookfunction = canonicalMethods.hookfunction,
+    restorefunction = canonicalMethods.restorefunction,
+    filtergc = canonicalMethods.filtergc,
     getgc = canonicalMethods.getgc,
+    getluaclosures = getLuaClosuresCompat,
     getinfo = canonicalMethods.getinfo,
     getsenv = canonicalMethods.getsenv,
     getmenv = canonicalMethods.getmenv,
-    getthreadcontext = getThreadContextCompat,
+    getthreadidentity = canonicalMethods.getthreadidentity,
     getconnections = canonicalMethods.getconnections,
     getscriptclosure = canonicalMethods.getscriptclosure,
+    getscriptfromthread = canonicalMethods.getscriptfromthread,
+    getrunningscripts = getRunningScriptsCompat,
     getnamecallmethod = canonicalMethods.getnamecallmethod,
     getcallingscript = canonicalMethods.getcallingscript,
     getloadedmodules = canonicalMethods.getloadedmodules,
@@ -232,7 +357,8 @@ local globalMethods = {
     gethui = canonicalMethods.gethui,
     setclipboard = canonicalMethods.setclipboard,
     setconstant = canonicalMethods.setconstant,
-    setthreadcontext = setThreadContextCompat,
+    setthreadidentity = canonicalMethods.setthreadidentity,
+    withthreadidentity = canonicalMethods.getthreadidentity and canonicalMethods.setthreadidentity and withThreadIdentityCompat,
     setupvalue = canonicalMethods.setupvalue,
     setstack = canonicalMethods.setstack,
     setreadonly = canonicalMethods.setreadonly,
@@ -245,22 +371,30 @@ local globalMethods = {
     makefolder = canonicalMethods.makefolder,
     isfolder = canonicalMethods.isfolder,
     isfile = canonicalMethods.isfile,
+    httpget = canonicalMethods.httpget,
     request = canonicalMethods.request,
+    identifyexecutor = canonicalMethods.identifyexecutor,
     othHook = canonicalMethods.oth_hook,
     othUnhook = canonicalMethods.oth_unhook,
-    othGetRootCallback = canonicalMethods.oth_get_root_callback
+    othGetRootCallback = canonicalMethods.oth_get_root_callback,
+    othGetOriginalThread = canonicalMethods.oth_get_original_thread
 }
 
 globalMethods.checkCaller = globalMethods.checkcaller
 globalMethods.newCClosure = globalMethods.newcclosure
 globalMethods.hookFunction = globalMethods.hookfunction
+globalMethods.restoreFunction = globalMethods.restorefunction
+globalMethods.filterGc = globalMethods.filtergc
 globalMethods.getGc = globalMethods.getgc
+globalMethods.getLuaClosures = globalMethods.getluaclosures
 globalMethods.getInfo = globalMethods.getinfo
 globalMethods.getSenv = globalMethods.getsenv
 globalMethods.getMenv = globalMethods.getmenv
-globalMethods.getContext = globalMethods.getthreadcontext
+globalMethods.getContext = globalMethods.getthreadidentity
 globalMethods.getConnections = globalMethods.getconnections
 globalMethods.getScriptClosure = globalMethods.getscriptclosure
+globalMethods.getScriptFromThread = globalMethods.getscriptfromthread
+globalMethods.getRunningScripts = globalMethods.getrunningscripts
 globalMethods.getNamecallMethod = globalMethods.getnamecallmethod
 globalMethods.getCallingScript = globalMethods.getcallingscript
 globalMethods.getLoadedModules = globalMethods.getloadedmodules
@@ -275,7 +409,8 @@ globalMethods.getMetatable = globalMethods.getrawmetatable
 globalMethods.getHui = globalMethods.gethui
 globalMethods.setClipboard = globalMethods.setclipboard
 globalMethods.setConstant = globalMethods.setconstant
-globalMethods.setContext = globalMethods.setthreadcontext
+globalMethods.setContext = globalMethods.setthreadidentity
+globalMethods.withThreadIdentity = globalMethods.withthreadidentity
 globalMethods.setUpvalue = globalMethods.setupvalue
 globalMethods.setStack = globalMethods.setstack
 globalMethods.setReadOnly = globalMethods.setreadonly
@@ -298,8 +433,20 @@ local function httpGet(url)
             Method = "GET"
         })
 
-        if ran and response and response.Success and type(response.Body) == "string" then
+        if ran
+            and response
+            and (response.Success or (response.StatusCode and response.StatusCode >= 200 and response.StatusCode < 300))
+            and type(response.Body) == "string"
+        then
             return response.Body
+        end
+    end
+
+    if globalMethods.httpget then
+        local ran, response = pcall(globalMethods.httpget, url)
+
+        if ran and type(response) == "string" then
+            return response
         end
     end
 
@@ -322,30 +469,38 @@ local function httpGet(url)
     error("Unable to GET remote content: " .. url)
 end
 
-local function resolveBranchVersion(targetUser, targetBranch)
-    local url = ("https://api.github.com/repos/%s/Hydroxide/branches/%s"):format(targetUser, targetBranch)
+local function resolveBranchVersion(targetUser, targetRepository, targetBranch)
+    local url = ("https://api.github.com/repos/%s/%s/commits/%s"):format(
+        targetUser,
+        targetRepository,
+        HttpService:UrlEncode(targetBranch)
+    )
     local payload = HttpService:JSONDecode(httpGet(url))
-    local commit = payload and payload.commit
 
-    return commit and commit.sha
+    return payload and (payload.sha or (payload.commit and payload.commit.sha))
 end
 
 globalMethods.httpGet = httpGet
 globalMethods.resolveBranchVersion = resolveBranchVersion
 
-local function cacheFilePath(asset, hasFolderFunctions, targetUser)
+local function cacheFilePath(asset, hasFolderFunctions, targetUser, version)
     if hasFolderFunctions then
-        return ("hydroxide/user/%s/%s.lua"):format(targetUser, asset)
+        return ("hydroxide/cache/%s/%s/%s.lua"):format(targetUser, version, asset)
     end
 
-    return ("hydroxide-%s-%s.lua"):format(targetUser, asset:gsub("/", "-"))
+    return ("hydroxide-%s-%s-%s.lua"):format(targetUser, version, asset:gsub("/", "-"))
 end
 
-local function rawAssetUrl(targetUser, targetBranch, asset)
-    return ("https://raw.githubusercontent.com/%s/Hydroxide/%s/%s.lua"):format(targetUser, targetBranch, asset)
+local function rawAssetUrl(targetUser, targetRepository, targetBranch, asset)
+    return ("https://raw.githubusercontent.com/%s/%s/%s/%s.lua"):format(
+        targetUser,
+        targetRepository,
+        targetBranch,
+        asset
+    )
 end
 
-local function ensureCacheFolders(targetUser)
+local function ensureCacheFolders(targetUser, version)
     if not (globalMethods.isFolder and globalMethods.makeFolder) then
         return
     end
@@ -357,22 +512,79 @@ local function ensureCacheFolders(targetUser)
     end
 
     createFolder("hydroxide")
-    createFolder("hydroxide/user")
-    createFolder("hydroxide/user/" .. targetUser)
-    createFolder("hydroxide/user/" .. targetUser .. "/methods")
-    createFolder("hydroxide/user/" .. targetUser .. "/modules")
-    createFolder("hydroxide/user/" .. targetUser .. "/objects")
-    createFolder("hydroxide/user/" .. targetUser .. "/ui")
-    createFolder("hydroxide/user/" .. targetUser .. "/ui/controls")
-    createFolder("hydroxide/user/" .. targetUser .. "/ui/modules")
+    createFolder("hydroxide/cache")
+    createFolder("hydroxide/cache/" .. targetUser)
+
+    local versionRoot = "hydroxide/cache/" .. targetUser .. "/" .. version
+
+    createFolder(versionRoot)
+    createFolder(versionRoot .. "/methods")
+    createFolder(versionRoot .. "/modules")
+    createFolder(versionRoot .. "/objects")
+    createFolder(versionRoot .. "/ui")
+    createFolder(versionRoot .. "/ui/controls")
+    createFolder(versionRoot .. "/ui/modules")
+end
+
+local function restoreHookRecord(hook)
+    if type(hook) ~= "table" or hook.Active == false then
+        return
+    end
+
+    local restored = false
+
+    if hook.Kind == "oth" and hook.Target and globalMethods.othUnhook then
+        restored = pcall(globalMethods.othUnhook, hook.Target)
+    elseif hook.Kind == "metamethod" and hook.Object and hook.Method and hook.Original and globalMethods.hookMetaMethod then
+        restored = pcall(globalMethods.hookMetaMethod, hook.Object, hook.Method, hook.Original)
+    elseif (hook.Kind == "function" or hook.Kind == "metamethod") and hook.Target then
+        if globalMethods.restoreFunction then
+            restored = pcall(globalMethods.restoreFunction, hook.Target)
+        end
+
+        if not restored and hook.Original and globalMethods.hookFunction then
+            restored = pcall(globalMethods.hookFunction, hook.Target, hook.Original)
+        end
+    elseif hook.Closure and hook.Original and globalMethods.hookFunction then
+        restored = pcall(globalMethods.hookFunction, hook.Closure.Data, hook.Original)
+    end
+
+    if restored then
+        hook.Active = false
+    end
+
+    return restored
+end
+
+globalMethods.restoreHook = restoreHookRecord
+
+local executorName = "Unknown"
+local executorVersion = "Unknown"
+
+if globalMethods.identifyexecutor then
+    local ran, name, version = pcall(globalMethods.identifyexecutor)
+
+    if ran then
+        executorName = name or executorName
+        executorVersion = version or executorVersion
+    end
 end
 
 environment.hasMethods = hasMethods
 environment.oh = {
     Events = {},
     Hooks = {},
+    Instances = {},
+    DisabledConnections = {},
     Cache = importCache,
     Methods = globalMethods,
+    Runtime = {
+        Name = executorName,
+        Version = executorVersion,
+        Owner = user,
+        Repository = repository,
+        Branch = branch
+    },
     Constants = {
         Types = {
             ["nil"] = "rbxassetid://4800232219",
@@ -402,38 +614,56 @@ environment.oh = {
         }
     },
     Exit = function()
-        for _, event in pairs(oh.Events) do
+        local runtime = environment.oh
+
+        if not runtime then
+            return
+        end
+
+        for _, event in pairs(runtime.Events) do
             if event and event.Disconnect then
-                event:Disconnect()
+                pcall(function()
+                    event:Disconnect()
+                end)
             end
         end
 
-        for original, hook in pairs(oh.Hooks) do
-            local hookType = type(hook)
+        for _, hook in pairs(runtime.Hooks) do
+            restoreHookRecord(hook)
+        end
 
-            if hookType == "function" and globalMethods.hookFunction then
-                pcall(globalMethods.hookFunction, hook, original)
-            elseif hookType == "table" then
-                if hook.Kind == "function" and globalMethods.hookFunction then
-                    pcall(globalMethods.hookFunction, hook.Target, hook.Original)
-                elseif hook.Kind == "oth" and globalMethods.othUnhook and hook.Handle then
-                    pcall(globalMethods.othUnhook, hook.Handle)
-                elseif hook.Closure and hook.Original and globalMethods.hookFunction then
-                    pcall(globalMethods.hookFunction, hook.Closure.Data, hook.Original)
-                end
+        for _, connection in pairs(runtime.DisabledConnections) do
+            if connection and connection.Enable then
+                pcall(function()
+                    connection:Enable()
+                end)
+            end
+        end
+
+        for _, instance in pairs(runtime.Instances) do
+            if typeof(instance) == "Instance" then
+                pcall(function()
+                    instance:Destroy()
+                end)
             end
         end
 
         local ui = importCache["rbxassetid://11389137937"]
         local assets = importCache["rbxassetid://5042114982"]
 
-        if ui then
-            unpack(ui):Destroy()
+        if ui and ui[1] then
+            pcall(function()
+                ui[1]:Destroy()
+            end)
         end
 
-        if assets then
-            unpack(assets):Destroy()
+        if assets and assets[1] then
+            pcall(function()
+                assets[1]:Destroy()
+            end)
         end
+
+        environment.oh = nil
     end
 }
 
@@ -443,120 +673,102 @@ useMethods({
     resolveBranchVersion = resolveBranchVersion
 })
 
-if globalMethods.getConnections then
-    local setReadOnly = globalMethods.setReadOnly
+if config.suppressScriptErrors ~= false and globalMethods.getConnections then
+    local ran, connections = pcall(globalMethods.getConnections, game:GetService("ScriptContext").Error)
 
-    for _, connection in pairs(globalMethods.getConnections(game:GetService("ScriptContext").Error)) do
-        local connectionMetatable = globalMethods.getMetatable and globalMethods.getMetatable(connection)
-        local oldIndex = connectionMetatable and connectionMetatable.__index
+    if ran and type(connections) == "table" then
+        for _, connection in pairs(connections) do
+            if connection and connection.Disable and connection.Enabled ~= false then
+                local disabled = pcall(function()
+                    connection:Disable()
+                end)
 
-        if not connectionMetatable then
-            continue
-        end
-
-        if PROTOSMASHER_LOADED ~= nil then
-            setwriteable(connectionMetatable)
-        elseif setReadOnly then
-            setReadOnly(connectionMetatable, false)
-        end
-
-        if oldIndex and globalMethods.newCClosure then
-            connectionMetatable.__index = globalMethods.newCClosure(function(target, key)
-                if key == "Connected" then
-                    return true
+                if disabled then
+                    environment.oh.DisabledConnections[#environment.oh.DisabledConnections + 1] = connection
                 end
-
-                return oldIndex(target, key)
-            end)
-        end
-
-        if PROTOSMASHER_LOADED ~= nil then
-            if setReadOnly then
-                setReadOnly(connectionMetatable)
             end
-
-            connection:Disconnect()
-        else
-            if setReadOnly then
-                setReadOnly(connectionMetatable, true)
-            end
-
-            connection:Disable()
         end
     end
 end
 
 local currentVersion = branch
+local versionResolved = branch:match("^%x+$") ~= nil and #branch == 40
 
-if web then
-    local ran, result = pcall(resolveBranchVersion, user, branch)
+if web and not versionResolved then
+    local ran, result = pcall(resolveBranchVersion, user, repository, branch)
 
     if ran and result then
         currentVersion = result
+        versionResolved = true
     end
 end
 
+local cacheVersion = currentVersion:gsub("[^%w_-]", "_")
+local sourceRef = versionResolved and currentVersion or branch
+environment.oh.Runtime.Commit = versionResolved and currentVersion or nil
+
 local hasFileIO = globalMethods.readFile and globalMethods.writeFile
 local hasFolderFunctions = globalMethods.isFolder and globalMethods.makeFolder
-local shouldRefresh = false
+local usePersistentCache = web and hasFileIO and config.cache ~= false and versionResolved
 
-if hasFileIO then
-    ensureCacheFolders(user)
+if usePersistentCache then
+    local cacheReady = pcall(ensureCacheFolders, user, cacheVersion)
+    usePersistentCache = cacheReady
+end
 
-    local ran, version = pcall(globalMethods.readFile, "__oh_version.txt")
-    shouldRefresh = not ran or version ~= currentVersion
+local function executeSource(content, chunkName)
+    local chunk, compileError = loadstring(content, chunkName)
 
-    if shouldRefresh then
-        globalMethods.writeFile("__oh_version.txt", currentVersion)
-    end
+    assert(chunk, compileError)
+    return pack(chunk())
 end
 
 function environment.import(asset)
     if importCache[asset] then
-        return unpack(importCache[asset])
+        local cached = importCache[asset]
+        return unpackValues(cached, 1, cached.n or #cached)
     end
 
     local assets
 
     if asset:find("rbxassetid://", 1, true) then
-        assets = { game:GetObjects(asset)[1] }
+        assets = pack(game:GetObjects(asset)[1])
     elseif web then
         local content
 
-        if hasFileIO then
-            local file = cacheFilePath(asset, hasFolderFunctions, user)
+        if usePersistentCache then
+            local file = cacheFilePath(asset, hasFolderFunctions, user, cacheVersion)
+            local canReadCache = true
 
-            if not shouldRefresh then
-                local canReadCache = true
+            if globalMethods.isFile then
+                local checked, exists = pcall(globalMethods.isFile, file)
+                canReadCache = checked and exists
+            end
 
-                if globalMethods.isFile then
-                    canReadCache = globalMethods.isFile(file)
-                end
+            if canReadCache then
+                local ran, result = pcall(globalMethods.readFile, file)
 
-                if canReadCache then
-                    local ran, result = pcall(globalMethods.readFile, file)
-
-                    if ran then
-                        content = result
-                    end
+                if ran and type(result) == "string" then
+                    content = result
                 end
             end
 
             if not content then
-                content = httpGet(rawAssetUrl(user, branch, asset))
-                globalMethods.writeFile(file, content)
+                content = httpGet(rawAssetUrl(user, repository, sourceRef, asset))
+                pcall(globalMethods.writeFile, file, content)
             end
         else
-            content = httpGet(rawAssetUrl(user, branch, asset))
+            content = httpGet(rawAssetUrl(user, repository, sourceRef, asset))
         end
 
-        assets = { loadstring(content, asset .. ".lua")() }
+        assets = executeSource(content, asset .. ".lua")
     else
-        assets = { loadstring(globalMethods.readFile("hydroxide/" .. asset .. ".lua"), asset .. ".lua")() }
+        assert(globalMethods.readFile, "Local imports require readfile")
+        assets = executeSource(globalMethods.readFile("hydroxide/" .. asset .. ".lua"), asset .. ".lua")
     end
 
     importCache[asset] = assets
-    return unpack(assets)
+    return unpackValues(assets, 1, assets.n or #assets)
 end
 
 useMethods({

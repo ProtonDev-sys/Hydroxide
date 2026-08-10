@@ -4,6 +4,12 @@ local function assertEqual(actual, expected, label)
     end
 end
 
+local function assertTrue(value, label)
+    if not value then
+        error(label .. ": expected truthy value", 2)
+    end
+end
+
 local function pick(...)
     for index = 1, select("#", ...) do
         local value = select(index, ...)
@@ -53,8 +59,41 @@ local function httpGet(capabilities, url)
     return capabilities.httpGetAsync(url)
 end
 
-local function resolveBranchVersion(payload)
-    return payload and payload.commit and payload.commit.sha
+local function resolveRefVersion(payload)
+    return payload and (payload.sha or (payload.commit and payload.commit.sha))
+end
+
+local function getLuaClosures(capabilities)
+    if capabilities.filtergc then
+        local ran, closures = pcall(capabilities.filtergc, "function", {
+            IgnoreExecutor = true
+        }, false)
+
+        if ran and type(closures) == "table" then
+            local filtered = {}
+
+            for _, closure in pairs(closures) do
+                if not capabilities.islclosure or capabilities.islclosure(closure) then
+                    filtered[#filtered + 1] = closure
+                end
+            end
+
+            return filtered
+        end
+    end
+
+    local filtered = {}
+
+    for _, object in pairs(capabilities.getgc(false)) do
+        if type(object) == "function"
+            and (not capabilities.islclosure or capabilities.islclosure(object))
+            and (not capabilities.isexecutorclosure or not capabilities.isexecutorclosure(object))
+        then
+            filtered[#filtered + 1] = object
+        end
+    end
+
+    return filtered
 end
 
 do
@@ -137,7 +176,7 @@ end
 
 do
     assertEqual(
-        resolveBranchVersion({
+        resolveRefVersion({
             commit = {
                 sha = "91327d015db39a7e39e674075f45ee8304aad0aa"
             }
@@ -145,6 +184,56 @@ do
         "91327d015db39a7e39e674075f45ee8304aad0aa",
         "branch sha extraction"
     )
+
+    assertEqual(
+        resolveRefVersion({
+            sha = "86f75436fb8c230d41ca7c76cb506d0f655d13ee"
+        }),
+        "86f75436fb8c230d41ca7c76cb506d0f655d13ee",
+        "commit sha extraction"
+    )
+end
+
+do
+    local luaClosure = function() end
+    local cClosure = function() end
+    local filterCalls = 0
+    local closures = getLuaClosures({
+        filtergc = function(filterType, options, filterOne)
+            filterCalls = filterCalls + 1
+            assertEqual(filterType, "function", "filtergc type")
+            assertTrue(options.IgnoreExecutor, "filtergc ignores executor closures")
+            assertEqual(filterOne, false, "filtergc returns all matches")
+            return { luaClosure, cClosure }
+        end,
+        islclosure = function(value)
+            return value ~= cClosure
+        end
+    })
+
+    assertEqual(filterCalls, 1, "filtergc preferred")
+    assertEqual(#closures, 1, "C closures removed")
+    assertEqual(closures[1], luaClosure, "Lua closure retained")
+end
+
+do
+    local gameClosure = function() end
+    local executorClosure = function() end
+    local closures = getLuaClosures({
+        getgc = function(includeTables)
+            assertEqual(includeTables, false, "fallback excludes GC tables")
+            return { {}, gameClosure, executorClosure }
+        end,
+        islclosure = function()
+            return true
+        end,
+        isexecutorclosure = function(value)
+            return value == executorClosure
+        end
+    })
+
+    assertEqual(#closures, 1, "fallback filters executor closure")
+    assertEqual(closures[1], gameClosure, "fallback retains game closure")
 end
 
 print("compat_spec.lua: ok")

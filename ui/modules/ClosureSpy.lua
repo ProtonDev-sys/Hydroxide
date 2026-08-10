@@ -104,7 +104,7 @@ local removeConditionContextSelected = ContextMenuButton.new("rbxassetid://47028
 
 local closureListMenu = ContextMenu.new({ conditionContext, clearContext, ignoreContext, blockContext, removeContext })
 local closureListMenuSelected = ContextMenu.new({ clearContextSelected, ignoreContextSelected, unignoreContextSelected, blockContextSelected, unblockContextSelected, removeContextSelected })
-local hookLogsMenu = ContextMenu.new({ callingScriptContext, spyClosureContext, repeatCallContext })
+local hookLogsMenu = ContextMenu.new({ callingScriptContext, spyClosureContext })
 local closureConditionMenu = ContextMenu.new({ removeConditionContext })
 local closureConditionMenuSelected = ContextMenu.new({ removeConditionContextSelected })
 
@@ -298,40 +298,34 @@ function Log.new(hook)
     end
 
     listButton:SetCallback(function()
-        local oldContext = getContext()
-        setContext(7)
-
-        if selected.hookLog ~= log then
-            if #hook.Logs > 400 then
-                MessageBox.Show("Warning",
-                    "This closure seems to have a lot of calls, opening this may cause your game to freeze for a few seconds.\n\nContinue?",
-                    MessageType.YesNo,
-                    viewLogs)
-            else
-                viewLogs()
+        withThreadIdentity(7, function()
+            if selected.hookLog ~= log then
+                if #hook.Logs > 400 then
+                    MessageBox.Show("Warning",
+                        "This closure seems to have a lot of calls, opening this may cause your game to freeze for a few seconds.\n\nContinue?",
+                        MessageType.YesNo,
+                        viewLogs)
+                else
+                    viewLogs()
+                end
             end
-        end
 
-        ClosureList.Visible = false
-        ClosureLogs.Visible = true
+            ClosureList.Visible = false
+            ClosureLogs.Visible = true
 
-        selected.hookLog = log
-
-        setContext(oldContext)
+            selected.hookLog = log
+        end)
     end)
 
     listButton:SetRightCallback(function()
-        local oldContext = getContext()
-        setContext(7)
+        withThreadIdentity(7, function()
+            ignoreContext:SetIcon((hook.Ignored and icons.unignore) or icons.ignore)
+            ignoreContext:SetText((hook.Ignored and "Unignore Calls") or "Ignore Calls")
+            blockContext:SetIcon((hook.Blocked and icons.unblock) or icons.block)
+            blockContext:SetText((hook.Blocked and "Unblock Calls") or "Block Calls")
 
-        ignoreContext:SetIcon((hook.Ignored and icons.unignore) or icons.ignore)
-        ignoreContext:SetText((hook.Ignored and "Unignore Calls") or "Ignore Calls")
-        blockContext:SetIcon((hook.Blocked and icons.unblock) or icons.block)
-        blockContext:SetText((hook.Blocked and "Unblock Calls") or "Block Calls")
-
-        selected.logContext = log
-
-        setContext(oldContext)
+            selected.logContext = log
+        end)
     end)
 
     listButton:SetSelectedCallback(function()
@@ -347,14 +341,13 @@ function Log.new(hook)
     log.BlockAnimation = blockAnimation
     log.IgnoreAnimation = ignoreAnimation
     log.NormalAnimation = normalAnimation
-    log.NormalAnimation = normalAnimation
     log.Clear = Log.clear
     log.PlayBlock = Log.playBlock
     log.PlayIgnore = Log.playIgnore
     log.PlayNormal = Log.playNormal
     log.Adjust = Log.adjust
     log.IncrementCalls = Log.incrementCalls
-    log.Decrementcalls = Log.decrementCalls
+    log.DecrementCalls = Log.decrementCalls
 
     return log
 end
@@ -445,7 +438,7 @@ function Log.incrementCalls(log, call)
     local logInstance = log.Button.Instance
     local hook = log.Hook
 
-    hook.Calls = hook.Calls + 1
+    hook:IncrementCalls(call)
     local calls = hook.Calls
     logInstance.Calls.Text = (calls < 10000 and calls) or "..."
 
@@ -457,33 +450,41 @@ function Log.incrementCalls(log, call)
     end
 end
 
-function Log.decrementCalls(log, args)
+function Log.decrementCalls(log, call)
     local buttonInstance = log.Button.Instance
     local hook = log.Hook
 
-    hook.Calls = Hook.calls - 1
+    hook:DecrementCalls(call)
 
     local calls = hook.Calls
 
-    -- hook:DecrementCalls(args)
     buttonInstance.Calls.Text = (calls < 10000 and calls) or "..."
     log:Adjust()
 end
 
 function Log.remove(log)
     local hook = log.Hook
+    local removedHook, removeError = hook:Remove()
+
+    if not removedHook then
+        MessageBox.Show("Cannot unhook", removeError or "Unable to restore the original closure", MessageType.OK)
+        return false
+    end
 
     log.Button:Remove()
     currentLogs[hook] = nil
     removed[hook] = true
+    return true
 end
 
 -- UI Functionality
 ListSearch.FocusLost:Connect(function(returned)
     if returned then
+        local query = ListSearch.Text:lower()
+
         for hook, log in pairs(currentLogs) do
             local instance = log.Button.Instance
-            instance.Visible = not (instance.Visible and not hook.Closure.Name:lower():find(ListSearch.Text))
+            instance.Visible = hook.Closure.Name:lower():find(query, 1, true) ~= nil
         end
 
         closureList:Recalculate()
@@ -789,6 +790,10 @@ removeContextSelected:SetCallback(function()
 end)
 
 callingScriptContext:SetCallback(function()
+    if typeof(selected.callingScript) ~= "Instance" then
+        return
+    end
+
     local oldStatus = oh.getStatus()
 
     oh.setStatus("Copying " .. selected.callingScript.Name .. "'s path")
@@ -836,15 +841,12 @@ conditionValueType:SetCallback(function(_dropdown, selected)
 end)
 
 Methods.SetEvent(function(hook, call)
-    local oldContext = getContext()
-    setContext(7)
-
-    if not removed[hook] then
-        local log = currentLogs[hook] or Log.new(hook)
-        log:IncrementCalls(call)
-    end
-    
-    setContext(oldContext)
+    withThreadIdentity(7, function()
+        if not removed[hook] then
+            local log = currentLogs[hook] or Log.new(hook)
+            log:IncrementCalls(call)
+        end
+    end)
 end)
 
 return ClosureSpy

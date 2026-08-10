@@ -167,7 +167,8 @@ local function addUpvalue(upvalue, temporary)
         end
 
         if valueType == "function" then
-            local closureName = getInfo(value).name or ''
+            local ran, info = pcall(getInfo, value, "n")
+            local closureName = ran and info and info.name or ''
             upvalueLog.Value.Text = (closureName == '' and "Unnamed function") or closureName
         else
             upvalueLog.Value.Text = toString(value)
@@ -202,7 +203,8 @@ local function updateUpvalue(closureLog, upvalue)
     local valueType = type(newValue)
 
     if valueType == "function" then
-        local closureName = getInfo(newValue).name or ''
+        local ran, info = pcall(getInfo, newValue, "n")
+        local closureName = ran and info and info.name or ''
         upvalueLog.Value.Text = (closureName == '' and "Unnamed function") or closureName
     elseif valueType == "table" and upvalue.Scanned then
         for i, v in pairs(upvalue.Scanned) do
@@ -512,12 +514,12 @@ spyClosureContext:SetCallback(function()
     local closure = selectedLog.Closure
 
     if TabSelector.SelectTab("ClosureSpy") then
-        local result = SpyHook.new(closure)
+        local result, hookError = SpyHook.new(closure)
 
         if result == false then
             MessageBox.Show("Already hooked", "You are already spying " .. closure.Name)
         elseif result == nil then
-            MessageBox.Show("Cannot hook", ('Cannot hook "%s" because there are no upvalues'):format(closure.Name))
+            MessageBox.Show("Cannot hook", hookError or ('Unable to hook "%s"'):format(closure.Name))
         end
     end
 end)

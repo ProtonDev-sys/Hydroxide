@@ -26,24 +26,12 @@ local function toString(value)
     local rawType = type(value)
 
     if rawType == "table" or valueType == "table" then
-        local metatable = getMetatable and getMetatable(value)
-        local tostringHandler = metatable and rawget(metatable, "__tostring")
-
-        if not metatable or not tostringHandler then
-            return tostring(value)
-        end
-
-        rawset(metatable, "__tostring", nil)
-
-        local stringValue = tostring(value):gsub((valueType == "userdata" and "userdata: ") or "table: ", "")
-
-        rawset(metatable, "__tostring", tostringHandler)
-
-        return stringValue
+        return tostring(value)
     elseif isBuffer(value, valueType) then
         return "buffer"
     elseif rawType == "function" then
-        local closureName = getInfo(value).name or ""
+        local ran, info = pcall(getInfo, value, "n")
+        local closureName = ran and info and info.name or ""
         return (closureName == "" and "Unnamed function") or closureName
     elseif rawType == "userdata" or valueType ~= rawType then
         return userdataValue(value)
@@ -53,13 +41,13 @@ local function toString(value)
 end
 
 local function toUnicode(value)
-    local codepoints = "utf8.char("
+    local codepoints = {}
 
     for _, codepoint in utf8.codes(value) do
-        codepoints = codepoints .. codepoint .. ", "
+        codepoints[#codepoints + 1] = tostring(codepoint)
     end
 
-    return codepoints:sub(1, -3) .. ")"
+    return "utf8.char(" .. table.concat(codepoints, ", ") .. ")"
 end
 
 local function dataToString(data)

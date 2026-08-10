@@ -50,7 +50,8 @@ local function addConstant(constant, temporary)
     end
 
     if valueType == "function" then
-        local closureName = getInfo(value).name or ''
+        local ran, info = pcall(getInfo, value, "n")
+        local closureName = ran and info and info.name or ''
         constantLog.Value.Text = (closureName == '' and "Unnamed function") or closureName
     else
         constantLog.Value.Text = toString(value)
@@ -134,12 +135,12 @@ spyClosureContext:SetCallback(function()
     local selectedClosure = selectedLog.Closure
 
     if TabSelector.SelectTab("ClosureSpy") then
-        local result = SpyHook.new(selectedClosure)
+        local result, hookError = SpyHook.new(selectedClosure)
 
         if result == false then
             MessageBox.Show("Already hooked", "You are already spying " .. selectedClosure.Name)
         elseif result == nil then
-            MessageBox.Show("Cannot hook", ('Cannot hook "%s" because there are no upvalues'):format(selectedClosure.Name))
+            MessageBox.Show("Cannot hook", hookError or ('Unable to hook "%s"'):format(selectedClosure.Name))
         end
     end
 end)

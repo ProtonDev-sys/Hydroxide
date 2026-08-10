@@ -505,9 +505,11 @@ end
 
 ListSearch.FocusLost:Connect(function(returned)
     if returned then
+        local query = ListSearch.Text:lower()
+
         for remoteInstance, log in pairs(currentLogs) do
             local instance = log.Button.Instance
-            instance.Visible = not (instance.Visible and not remoteInstance.Name:lower():find(ListSearch.Text))
+            instance.Visible = remoteInstance.Name:lower():find(query, 1, true) ~= nil
         end
 
         remoteList:Recalculate()
@@ -888,13 +890,17 @@ end)
 local SpyHook = ClosureSpy.Hook
 spyClosureContext:SetCallback(function()
     if TabSelector.SelectTab("ClosureSpy") then
+        if type(selected.func) ~= "function" then
+            return MessageBox.Show("Cannot hook", "No Lua closure was captured for this call", MessageType.OK)
+        end
+
         local selectedClosure = Closure.new(selected.func)
-        local result = SpyHook.new(selectedClosure)
+        local result, hookError = SpyHook.new(selectedClosure)
 
         if result == false then
             MessageBox.Show("Already hooked", "You are already spying " .. selectedClosure.Name)
         elseif result == nil then
-            MessageBox.Show("Cannot hook", ('Cannot hook "%s" because there are no upvalues'):format(selectedClosure.Name))
+            MessageBox.Show("Cannot hook", hookError or ('Unable to hook "%s"'):format(selectedClosure.Name))
         end
     end
 end)

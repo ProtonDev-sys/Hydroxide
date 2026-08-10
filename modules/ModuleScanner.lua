@@ -2,7 +2,6 @@ local ModuleScanner = {}
 local ModuleScript = import("objects/ModuleScript")
 
 local requiredMethods = {
-    ["getMenv"] = true,
     ["getProtos"] = true,
     ["getConstants"] = true,
     ["getScriptClosure"] = true,
@@ -11,11 +10,25 @@ local requiredMethods = {
 
 local function scan(query)
     local modules = {}
-    query = query or ""
-    
-    for _i, module in pairs(getLoadedModules()) do
-        if module.Name:lower():find(query) then
-            modules[module] = ModuleScript.new(module)
+    query = (query or ""):lower()
+    local ran, loadedModules = pcall(getLoadedModules)
+
+    if not ran or type(loadedModules) ~= "table" then
+        return modules
+    end
+
+    for _, module in pairs(loadedModules) do
+        if typeof(module) == "Instance" and module.Name:lower():find(query, 1, true) then
+            local closureRan, closure = pcall(getScriptClosure, module)
+            local created, moduleScript = false, nil
+
+            if closureRan and closure then
+                created, moduleScript = pcall(ModuleScript.new, module, closure)
+            end
+
+            if created and moduleScript then
+                modules[module] = moduleScript
+            end
         end
     end
 
