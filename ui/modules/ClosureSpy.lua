@@ -1346,15 +1346,6 @@ local function inspectTargetFunction()
 	TextViewer.Show("Target Function", describeFunction(func))
 end
 
-local function inspectTargetFunction()
-	if not guardSelectedCall("Target Function") then
-		return
-	end
-
-	local func = selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Target
-	TextViewer.Show("Target Function", describeFunction(func))
-end
-
 local function inspectCallingScript()
 	if not guardSelectedCall("Calling Script") then
 		return
