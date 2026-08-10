@@ -29,6 +29,7 @@ local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local TextViewer = import("ui/controls/TextViewer")
 local InlineViewer = import("ui/controls/InlineViewer")
+local FunctionInspector = import("ui/controls/FunctionInspector")
 local ActionPanel = import("ui/controls/ActionPanel")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
 local TabSelector = import("ui/controls/TabSelector")
@@ -402,96 +403,17 @@ local function describePackedValues(title, values)
 end
 
 local function describeFunction(func)
-	if type(func) ~= "function" then
-		return "No Lua closure was captured for this call."
-	end
-
-	local lines = {}
-	local ran, info = pcall(getInfo, func)
-	info = ran and info or nil
-
-	lines[#lines + 1] = "Function: " .. argumentSummary(func)
-	lines[#lines + 1] = "Name: " .. tostring(info and info.name or "unknown")
-	lines[#lines + 1] = "Source: " .. tostring(info and (info.short_src or info.source) or "unknown")
-	lines[#lines + 1] = "Line Defined: " .. tostring(info and info.linedefined or "unknown")
-	lines[#lines + 1] = "Current Line: " .. tostring(info and info.currentline or "unknown")
-	lines[#lines + 1] = "Upvalues: " .. tostring(info and info.nups or "unknown")
-
-	if type(getConstants) == "function" then
-		local constantsRan, constants = pcall(getConstants, func)
-		lines[#lines + 1] = "Constants: "
-			.. tostring(constantsRan and type(constants) == "table" and #constants or "unavailable")
-	end
-
-	if type(getProtos) == "function" then
-		local protosRan, protos = pcall(getProtos, func)
-		lines[#lines + 1] = "Protos: " .. tostring(protosRan and type(protos) == "table" and #protos or "unavailable")
-	end
-
-	if type(getUpvalues) == "function" then
-		local upvaluesRan, upvalues = pcall(getUpvalues, func)
-		if upvaluesRan and type(upvalues) == "table" then
-			lines[#lines + 1] = "Captured Upvalue Values: " .. tostring(#upvalues)
-			for index = 1, math.min(#upvalues, 12) do
-				lines[#lines + 1] = ("  [%02d] %s"):format(index, argumentSummary(upvalues[index]))
-			end
-		end
-	end
-
-	if type(decompile) == "function" then
-		local decompiled, source = pcall(decompile, func)
-
-		if decompiled and type(source) == "string" and source ~= "" then
-			lines[#lines + 1] = ""
-			lines[#lines + 1] = "-- Decompiled source"
-			lines[#lines + 1] = source
-		else
-			lines[#lines + 1] = ""
-			lines[#lines + 1] = "Decompiler failed or returned no source."
-		end
-	else
-		lines[#lines + 1] = ""
-		lines[#lines + 1] = "Decompiler is not available in this executor."
-	end
-
-	return table.concat(lines, "\n")
+	return FunctionInspector.DescribeFunction(func, {
+		Summarize = argumentSummary,
+		GetPath = safeInstancePath,
+	})
 end
 
 local function describeStackFunctions(callInfo)
-	if not callInfo or type(callInfo.stack) ~= "table" or #callInfo.stack == 0 then
-		return "No function stack was captured for this call."
-	end
-
-	local lines = {
-		"REMOTE FUNCTION STACK",
-		("Frames: %d"):format(#callInfo.stack),
-		"",
-	}
-
-	for index, frame in ipairs(callInfo.stack) do
-		if type(frame) == "table" then
-			local func = frame.func or frame.Function
-			local name = frame.name or frame.Name or "anonymous"
-			local source = cleanSource(frame.shortSource or frame.short_src or frame.source or frame.Source)
-			local line = tonumber(frame.line or frame.currentline or frame.Line)
-			lines[#lines + 1] = ("-- %02d  %s  %s:%s"):format(
-				index,
-				tostring(name),
-				source,
-				line and tostring(math.floor(line)) or "?"
-			)
-
-			if type(func) == "function" then
-				lines[#lines + 1] = describeFunction(func)
-			else
-				lines[#lines + 1] = "No function object was exposed for this frame."
-			end
-
-			lines[#lines + 1] = ""
-		end
-	end
-
-	return table.concat(lines, "\n")
+	return FunctionInspector.DescribeStack(callInfo and callInfo.stack, {
+		Summarize = argumentSummary,
+		GetPath = safeInstancePath,
+	})
 end
 
 local function describeScript(scriptInstance)
