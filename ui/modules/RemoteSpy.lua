@@ -587,7 +587,7 @@ updateCallInspector = function()
 	callInspector:SetEnabled("ScriptSource", typeof(selected.callingScript) == "Instance")
 	callInspector:SetEnabled("ScriptPath", typeof(selected.callingScript) == "Instance")
 	callInspector:SetEnabled("SpyFunction", type(selected.func) == "function")
-	callInspector:SetEnabled("Repeat", method ~= nil and remoteInstance and remoteInstance[method] ~= nil)
+	callInspector:SetEnabled("Repeat", method ~= nil and remoteInstance ~= nil)
 	callInspector:SetEnabled("Hex", hasStringArg())
 end
 
@@ -1543,12 +1543,14 @@ local function copyCallingScriptPath()
 		return TextViewer.Show("Calling Script", "No calling script was captured for this call.")
 	end
 
-	local oldStatus = oh.getStatus()
+	local path = safeInstancePath(selected.callingScript)
+	local copied, copyError = path and pcall(setClipboard, path)
 
-	oh.setStatus("Copying " .. selected.callingScript.Name .. "'s path")
-	setClipboard(getInstancePath(selected.callingScript))
-	task.wait(0.25)
-	oh.setStatus(oldStatus)
+	if not copied then
+		TextViewer.Show("Copy Failed", tostring(copyError or "The calling script path is unavailable."))
+	else
+		oh.setStatus("Calling script path copied")
+	end
 end
 
 local SpyHook = ClosureSpy.Hook
@@ -1557,19 +1559,31 @@ local function spyCallingFunction()
 		return
 	end
 
-	if TabSelector.SelectTab("ClosureSpy") then
-		if type(selected.func) ~= "function" then
-			return MessageBox.Show("Cannot hook", "No Lua closure was captured for this call", MessageType.OK)
-		end
+	if type(selected.func) ~= "function" then
+		return MessageBox.Show("Cannot hook", "No Lua closure was captured for this call", MessageType.OK)
+	end
 
+	local function installCallerHook()
 		local selectedClosure = Closure.new(selected.func)
 		local result, hookError = SpyHook.new(selectedClosure)
 
 		if result == false then
-			MessageBox.Show("Already hooked", "You are already spying " .. selectedClosure.Name)
+			MessageBox.Show("Already hooked", "You are already spying " .. selectedClosure.Name, MessageType.OK)
 		elseif result == nil then
-			MessageBox.Show("Cannot hook", hookError or ('Unable to hook "%s"'):format(selectedClosure.Name))
+			MessageBox.Show(
+				"Cannot hook",
+				hookError or ('Unable to hook "%s"'):format(selectedClosure.Name),
+				MessageType.OK
+			)
+		else
+			TabSelector.SelectTab("ClosureSpy")
 		end
+	end
+
+	if type(withExecutorIdentity) == "function" then
+		withExecutorIdentity(installCallerHook)
+	else
+		installCallerHook()
 	end
 end
 
@@ -1695,7 +1709,7 @@ callInspector = ActionPanel.Install(LogsButtons, RemoteLogs.Results, {
 		{ Name = "Arguments", Label = "Arguments", Icon = icons.arguments, Callback = showArguments },
 		{ Name = "Returns", Label = "Returns", Icon = icons.results, Callback = showReturns },
 		{ Name = "CallStack", Label = "Stack", Icon = icons.stack, Callback = showCallStack },
-		{ Name = "Function", Label = "Function", Icon = icons.spy, Callback = inspectCallingFunction },
+		{ Name = "Function", Label = "Caller Fn", Icon = icons.spy, Callback = inspectCallingFunction },
 		{ Name = "ScriptSource", Label = "Script", Icon = icons.source, Callback = inspectCallingScript },
 		{ Name = "ScriptPath", Label = "Copy Path", Icon = icons.copy, Callback = copyCallingScriptPath },
 		{ Name = "SpyFunction", Label = "Spy Caller", Icon = icons.spy, Callback = spyCallingFunction },

@@ -34,7 +34,13 @@ local runtimeSettings = {
     MaxRenderedLogs = numberSetting("maxRenderedLogs", 100, 10, 500),
     MaxArgumentPreviewLength = numberSetting("maxArgumentPreviewLength", 240, 40, 2000),
     MaxHexBytes = numberSetting("maxHexBytes", 512, 32, 8192),
-    MaxConcurrentImports = numberSetting("maxConcurrentImports", 6, 1, 12)
+    MaxConcurrentImports = numberSetting("maxConcurrentImports", 6, 1, 12),
+    MaxGeneratedTableEntries = numberSetting("maxGeneratedTableEntries", 256, 8, 5000),
+    MaxGeneratedTables = numberSetting("maxGeneratedTables", 512, 8, 5000),
+    MaxGeneratedTableDepth = numberSetting("maxGeneratedTableDepth", 16, 1, 64),
+    MaxGeneratedStringBytes = numberSetting("maxGeneratedStringBytes", 65536, 256, 1048576),
+    MaxGeneratedBufferBytes = numberSetting("maxGeneratedBufferBytes", 65536, 256, 1048576),
+    MaxGeneratedOutputBytes = numberSetting("maxGeneratedOutputBytes", 1048576, 16384, 8388608)
 }
 
 local function pick(...)
