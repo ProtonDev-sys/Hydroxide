@@ -61,6 +61,8 @@ local icons = {
 	ignore = "rbxassetid://4842578510",
 	unignore = "rbxassetid://4842578818",
 	copy = "rbxassetid://4891705738",
+	arguments = "rbxassetid://4666594276",
+	results = "rbxassetid://4666593882",
 	source = "rbxassetid://4891705738",
 	spy = "rbxassetid://4666593447",
 	stack = "rbxassetid://5179169654",
@@ -103,8 +105,11 @@ local ignoreContext = ContextMenuButton.new("rbxassetid://4842578510", "Ignore C
 local blockContext = ContextMenuButton.new("rbxassetid://4891641806", "Block Calls")
 local removeContext = ContextMenuButton.new("rbxassetid://4702831188", "Remove Log")
 
+local argumentsContext = ContextMenuButton.new(icons.arguments, "View Arguments")
+local returnsContext = ContextMenuButton.new(icons.results, "View Returns")
 local callStackContext = ContextMenuButton.new(icons.stack, "View Call Stack")
 local inspectFunctionContext = ContextMenuButton.new(icons.spy, "Inspect Calling Function")
+local inspectTargetContext = ContextMenuButton.new(icons.spy, "Inspect Target Function")
 local inspectScriptContext = ContextMenuButton.new(icons.source, "Inspect Calling Script")
 local callingScriptContext = ContextMenuButton.new(icons.copy, "Copy Calling Script Path")
 local spyClosureContext = ContextMenuButton.new(icons.spy, "Spy Calling Function")
@@ -130,8 +135,11 @@ local closureListMenuSelected = ContextMenu.new({
 	removeContextSelected,
 })
 local hookLogsMenu = ContextMenu.new({
+	argumentsContext,
+	returnsContext,
 	callStackContext,
 	inspectFunctionContext,
+	inspectTargetContext,
 	inspectScriptContext,
 	callingScriptContext,
 	spyClosureContext,
@@ -261,6 +269,58 @@ local function argumentSummary(value)
 	return text
 end
 
+local function formatTimestamp(timestamp)
+	if type(timestamp) ~= "number" then
+		return "unknown"
+	end
+
+	local seconds = math.floor(timestamp)
+	local milliseconds = math.floor((timestamp - seconds) * 1000 + 0.5) % 1000
+	local ran, formatted = pcall(os.date, "%Y-%m-%d %H:%M:%S", seconds)
+
+	if ran and type(formatted) == "string" then
+		return ("%s.%03d local"):format(formatted, milliseconds)
+	end
+
+	return ("%.3f"):format(timestamp)
+end
+
+local function safeInstancePath(instance)
+	if typeof(instance) ~= "Instance" then
+		return nil
+	end
+
+	local ran, path = pcall(getInstancePath, instance)
+	return ran and path or nil
+end
+
+local function cleanSource(source)
+	if type(source) ~= "string" then
+		return "unknown"
+	end
+
+	return source:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^[@=]", "")
+end
+
+local function describePackedValues(title, values)
+	local count = getArgCount(values)
+	local lines = { title, ("Count: %d"):format(count), "" }
+
+	if count == 0 then
+		lines[#lines + 1] = "(none)"
+		return table.concat(lines, "\n")
+	end
+
+	for index = 1, count do
+		local value = values[index]
+		local valueType = typeof(value)
+		local detail = valueType == "Instance" and safeInstancePath(value) or argumentSummary(value)
+		lines[#lines + 1] = ("[%02d]  %-18s  %s"):format(index, valueType, detail or "unavailable")
+	end
+
+	return table.concat(lines, "\n")
+end
+
 local function describeFunction(func)
 	if type(func) ~= "function" then
 		return "No caller function was captured for this call."
@@ -304,7 +364,7 @@ local function describeScript(scriptInstance)
 	local lines = {}
 	lines[#lines + 1] = "Name: " .. scriptInstance.Name
 	lines[#lines + 1] = "Class: " .. scriptInstance.ClassName
-	lines[#lines + 1] = "Path: " .. getInstancePath(scriptInstance)
+	lines[#lines + 1] = "Path: " .. (safeInstancePath(scriptInstance) or "unavailable")
 
 	if type(decompile) == "function" then
 		local decompiled, source = pcall(decompile, scriptInstance)
@@ -330,26 +390,45 @@ local function describeCallStack(call)
 		return "No call is selected."
 	end
 
-	local lines = {}
-	lines[#lines + 1] = "Method: " .. tostring(call.method or "closure")
-	lines[#lines + 1] = "Timestamp: " .. tostring(call.timestamp or "unknown")
-	lines[#lines + 1] = "Off Thread: " .. tostring(call.offThread == true)
-	lines[#lines + 1] = "Calling Script: "
-		.. ((typeof(call.script) == "Instance" and getInstancePath(call.script)) or "unknown")
-	lines[#lines + 1] = "Function: " .. argumentSummary(call.func)
-	lines[#lines + 1] = ""
+	local caller = type(call.caller) == "table" and call.caller or {}
+	local state = call.blocked and "Blocked" or (call.error and "Forward error") or (call.forwarded and "Forwarded") or "Captured"
+	local source = cleanSource(caller.shortSource or caller.source)
+	local line = tonumber(caller.line)
+	local lines = {
+		"CLOSURE CALL TRACE",
+		("Target: %s"):format(
+			selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Closure.Name or "unknown"
+		),
+		("State: %s"):format(state),
+		("Captured: %s"):format(formatTimestamp(call.timestamp)),
+		("Duration: %s"):format(type(call.durationMs) == "number" and ("%.3f ms"):format(call.durationMs) or "not available"),
+		("Calling script: %s"):format(safeInstancePath(call.script) or "unknown"),
+		("Caller: %s"):format(tostring(caller.name or "anonymous")),
+		("Location: %s:%s"):format(source, line and tostring(math.floor(line)) or "?"),
+		("Arguments: %d | Returns: %d"):format(getArgCount(call.args), getArgCount(call.returns)),
+		"",
+	}
+
+	if call.error then
+		table.insert(lines, #lines, "Error: " .. tostring(call.error))
+	end
 
 	if type(call.chain) == "table" and #call.chain > 0 then
-		lines[#lines + 1] = "Call Chain:"
+		lines[#lines + 1] = ("Active spied-closure chain (%d):"):format(#call.chain)
 
 		for index, frame in ipairs(call.chain) do
 			if type(frame) == "table" then
-				local name = frame.name or frame.Name or frame.closureName or frame.ClosureName or "<anonymous>"
+				local name = frame.name or frame.Name or frame.closureName or frame.ClosureName or "anonymous"
 				local scriptInstance = frame.script or frame.Script
-				local scriptPath = typeof(scriptInstance) == "Instance"
-						and (" [" .. getInstancePath(scriptInstance) .. "]")
-					or ""
-				lines[#lines + 1] = ("%02d  %s%s"):format(index, tostring(name), scriptPath)
+				local scriptPath = safeInstancePath(scriptInstance)
+				local frameSource = cleanSource(frame.source)
+				local frameLine = tonumber(frame.line)
+				lines[#lines + 1] = ("%02d  %s"):format(index, tostring(name))
+				lines[#lines + 1] = ("    %s:%s%s"):format(
+					frameSource,
+					frameLine and tostring(math.floor(frameLine)) or "?",
+					scriptPath and ("  [" .. scriptPath .. "]") or ""
+				)
 			else
 				lines[#lines + 1] = ("%02d  %s"):format(index, tostring(frame))
 			end
@@ -365,23 +444,25 @@ local function describeCallStack(call)
 		return table.concat(lines, "\n")
 	end
 
-	lines[#lines + 1] = "Stack:"
+	lines[#lines + 1] = ("External VM call chain (%d frames; native and Hydroxide frames removed):"):format(#stack)
 
 	for index, frame in ipairs(stack) do
 		if type(frame) == "table" then
-			local name = frame.name or frame.Name or "<anonymous>"
-			local source = frame.short_src or frame.shortSource or frame.source or frame.Source or "unknown"
-			local line = frame.currentline or frame.line or frame.Line or "?"
+			local name = frame.name or frame.Name or "anonymous"
+			local source = cleanSource(frame.short_src or frame.shortSource or frame.source or frame.Source)
+			local line = tonumber(frame.currentline or frame.line or frame.Line)
 			local scriptInstance = frame.script or frame.Script
-			local scriptPath = typeof(scriptInstance) == "Instance" and (" [" .. getInstancePath(scriptInstance) .. "]")
-				or ""
-			lines[#lines + 1] = ("%02d  %s  %s:%s%s"):format(
-				index,
-				tostring(name),
-				tostring(source),
-				tostring(line),
-				scriptPath
+			local scriptPath = safeInstancePath(scriptInstance)
+			lines[#lines + 1] = ("%02d  %s"):format(index, tostring(name))
+			lines[#lines + 1] = ("    %s:%s%s"):format(
+				source,
+				line and tostring(math.floor(line)) or "?",
+				scriptPath and ("  [" .. scriptPath .. "]") or ""
 			)
+
+			if index < #stack then
+				lines[#lines + 1] = "    ->"
+			end
 		else
 			lines[#lines + 1] = ("%02d  %s"):format(index, tostring(frame))
 		end
@@ -403,8 +484,11 @@ updateCallInspector = function()
 
 	if not hasSelectedCall() or not selected.callInfo then
 		callInspector:SetStatus("Select a captured call to inspect")
+		callInspector:SetEnabled("Arguments", false)
+		callInspector:SetEnabled("Returns", false)
 		callInspector:SetEnabled("CallStack", false)
 		callInspector:SetEnabled("Function", false)
+		callInspector:SetEnabled("Target", false)
 		callInspector:SetEnabled("ScriptSource", false)
 		callInspector:SetEnabled("ScriptPath", false)
 		callInspector:SetEnabled("SpyFunction", false)
@@ -414,11 +498,19 @@ updateCallInspector = function()
 	local call = selected.callInfo
 	local argCount = getArgCount(selected.args)
 	local caller = typeof(call.script) == "Instance" and call.script.Name or "unknown script"
-	local status = ("%s args | %s"):format(argCount, tostring(call.method or "closure"))
+	local state = call.blocked and "blocked"
+		or (call.error and "forward error")
+		or (call.forwarded and "forwarded")
+		or "captured"
+	local duration = type(call.durationMs) == "number" and ("%.2f ms"):format(call.durationMs) or "no timing"
+	local status = ("closure • %d args • %s • %s"):format(argCount, state, duration)
 
-	callInspector:SetStatus(caller, status)
+	callInspector:SetStatus(status, caller)
+	callInspector:SetEnabled("Arguments", true)
+	callInspector:SetEnabled("Returns", call.completed == true)
 	callInspector:SetEnabled("CallStack", true)
-	callInspector:SetEnabled("Function", type(selected.func) == "function" or selected.hookLog ~= nil)
+	callInspector:SetEnabled("Function", type(selected.func) == "function")
+	callInspector:SetEnabled("Target", selected.hookLog ~= nil)
 	callInspector:SetEnabled("ScriptSource", typeof(selected.callingScript) == "Instance")
 	callInspector:SetEnabled("ScriptPath", typeof(selected.callingScript) == "Instance")
 	callInspector:SetEnabled("SpyFunction", type(selected.func) == "function")
@@ -1206,6 +1298,29 @@ removeContextSelected:SetCallback(function()
 	selected.logs = {}
 end)
 
+local function showArguments()
+	if guardSelectedCall("Closure Arguments") then
+		TextViewer.Show("Closure Arguments", describePackedValues("CAPTURED ARGUMENTS", selected.args or {}))
+	end
+end
+
+local function showReturns()
+	if not guardSelectedCall("Closure Returns") then
+		return
+	end
+
+	local call = selected.callInfo
+	local text = describePackedValues("RETURN VALUES", call.returns or {})
+
+	if call.blocked then
+		text = "The call was blocked before the target closure ran.\n\n" .. text
+	elseif call.error then
+		text = "The target closure raised an error:\n" .. tostring(call.error) .. "\n\n" .. text
+	end
+
+	TextViewer.Show("Closure Returns", text)
+end
+
 local function showCallStack()
 	if not guardSelectedCall("Closure Call Stack") then
 		return
@@ -1219,8 +1334,25 @@ local function inspectCallingFunction()
 		return
 	end
 
-	local func = selected.func or (selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Target)
-	TextViewer.Show("Calling Function", describeFunction(func))
+	TextViewer.Show("Calling Function", describeFunction(selected.func))
+end
+
+local function inspectTargetFunction()
+	if not guardSelectedCall("Target Function") then
+		return
+	end
+
+	local func = selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Target
+	TextViewer.Show("Target Function", describeFunction(func))
+end
+
+local function inspectTargetFunction()
+	if not guardSelectedCall("Target Function") then
+		return
+	end
+
+	local func = selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Target
+	TextViewer.Show("Target Function", describeFunction(func))
 end
 
 local function inspectCallingScript()
@@ -1240,12 +1372,14 @@ local function copyCallingScriptPath()
 		return TextViewer.Show("Calling Script", "No calling script was captured for this call.")
 	end
 
-	local oldStatus = oh.getStatus()
+	local path = safeInstancePath(selected.callingScript)
+	local copied, copyError = path and pcall(setClipboard, path)
 
-	oh.setStatus("Copying " .. selected.callingScript.Name .. "'s path")
-	setClipboard(getInstancePath(selected.callingScript))
-	task.wait(0.25)
-	oh.setStatus(oldStatus)
+	if not copied then
+		TextViewer.Show("Copy Failed", tostring(copyError or "The calling script path is unavailable."))
+	else
+		oh.setStatus("Calling script path copied")
+	end
 end
 
 local SpyHook = Methods.Hook
@@ -1276,20 +1410,26 @@ local function spyCallingFunction()
 	end)
 end
 
+argumentsContext:SetCallback(showArguments)
+returnsContext:SetCallback(showReturns)
 callStackContext:SetCallback(showCallStack)
 inspectFunctionContext:SetCallback(inspectCallingFunction)
+inspectTargetContext:SetCallback(inspectTargetFunction)
 inspectScriptContext:SetCallback(inspectCallingScript)
 callingScriptContext:SetCallback(copyCallingScriptPath)
 spyClosureContext:SetCallback(spyCallingFunction)
 
 callInspector = ActionPanel.Install(LogsButtons, ClosureLogs.Results, {
-	Columns = 3,
+	Columns = 5,
 	Actions = {
+		{ Name = "Arguments", Label = "Arguments", Icon = icons.arguments, Callback = showArguments },
+		{ Name = "Returns", Label = "Returns", Icon = icons.results, Callback = showReturns },
 		{ Name = "CallStack", Label = "Stack", Icon = icons.stack, Callback = showCallStack },
-		{ Name = "Function", Label = "Function", Icon = icons.spy, Callback = inspectCallingFunction },
+		{ Name = "Function", Label = "Caller Fn", Icon = icons.spy, Callback = inspectCallingFunction },
+		{ Name = "Target", Label = "Target Fn", Icon = icons.spy, Callback = inspectTargetFunction },
 		{ Name = "ScriptSource", Label = "Script", Icon = icons.source, Callback = inspectCallingScript },
-		{ Name = "ScriptPath", Label = "Path", Icon = icons.copy, Callback = copyCallingScriptPath },
-		{ Name = "SpyFunction", Label = "Spy Fn", Icon = icons.spy, Callback = spyCallingFunction },
+		{ Name = "ScriptPath", Label = "Copy Path", Icon = icons.copy, Callback = copyCallingScriptPath },
+		{ Name = "SpyFunction", Label = "Spy Caller", Icon = icons.spy, Callback = spyCallingFunction },
 	},
 })
 updateCallInspector()
