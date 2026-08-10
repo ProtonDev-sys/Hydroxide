@@ -47,6 +47,14 @@ end
 
 import("ui/controls/TabSelector")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
+local Base = Interface.Base
+local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+local originalWidth = math.max(650, Base.AbsoluteSize.X, Base.Size.X.Offset)
+local originalHeight = math.max(350, Base.AbsoluteSize.Y, Base.Size.Y.Offset)
+local baseWidth = math.floor(math.max(originalWidth, math.min(980, viewport.X - 40)))
+local baseHeight = math.floor(math.max(originalHeight, math.min(620, viewport.Y - 80)))
+
+Base.Size = UDim2.new(0, baseWidth, 0, baseHeight)
 
 local RemoteSpy
 local ClosureSpy
@@ -63,6 +71,7 @@ xpcall(function()
 	UpvalueScanner = import("ui/modules/UpvalueScanner")
 	ConstantScanner = import("ui/modules/ConstantScanner")
 end, function(err)
+	err = tostring(err)
 	local message
 	if err:find("valid member") then
 		message = "The UI asset changed. Rejoin and restart Hydroxide. If this repeats, report it at https://github.com/ProtonDev-sys/Hydroxide/issues.\n\n" .. err
@@ -75,9 +84,6 @@ end, function(err)
 	end)
 end)
 
-local baseWidth = 760
-local baseHeight = 430
-
 local constants = {
 	opened = UDim2.new(0.5, -baseWidth / 2, 0.5, -baseHeight / 2),
 	closed = UDim2.new(0.5, -baseWidth / 2, 0, -(baseHeight + 50)),
@@ -86,12 +92,10 @@ local constants = {
 }
 
 local Open = Interface.Open
-local Base = Interface.Base
 local Drag = Base.Drag
 local Status = Base.Status
 local Collapse = Drag.Collapse
 
-Base.Size = UDim2.new(0, baseWidth, 0, baseHeight)
 Base.Position = constants.closed
 
 function oh.setStatus(text)
