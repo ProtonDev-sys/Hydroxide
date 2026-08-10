@@ -2,7 +2,7 @@
 ```lua
 local owner = "ProtonDev-sys"
 local repository = "Hydroxide"
-local branch = "revision"
+local branch = "potassium-modernization-fork"
 
 getgenv().HydroxideConfig = {
     owner = owner,
@@ -37,7 +37,7 @@ This fork targets the current [Potassium API reference](https://docs.potassium.p
 
 Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
 
-The loader defaults to `ProtonDev-sys/Hydroxide` on `revision`. Override `owner`, `repository`, or `branch` in `HydroxideConfig` when testing another fork or commit.
+The loader defaults to `ProtonDev-sys/Hydroxide` on `potassium-modernization-fork`. Override `owner`, `repository`, or `branch` in `HydroxideConfig` when testing another fork or commit.
 
 # Hydroxide
 <i>Lua runtime introspection and network capturing tool for games on the Roblox engine.</i>
@@ -49,7 +49,7 @@ The loader defaults to `ProtonDev-sys/Hydroxide` on `revision`. Override `owner`
 <p align="center">
     <img src="https://cdn.discordapp.com/attachments/633472429917995038/722143730500501534/Hydroxide_Logo.png"/>
     </br>
-    <img src="https://raw.githubusercontent.com/Upbolt/Hydroxide/revision/github-assets/ui.png" width="677px"/>
+    <img src="https://raw.githubusercontent.com/ProtonDev-sys/Hydroxide/potassium-modernization-fork/github-assets/ui.png" width="677px"/>
 </p>
 
 ## Features
