@@ -16,33 +16,6 @@ local DEFAULTS = {
 	MaxGeneratedOutputBytes = 1048576,
 }
 
-local LUA_KEYWORDS = {
-	["and"] = true,
-	["break"] = true,
-	["continue"] = true,
-	["do"] = true,
-	["else"] = true,
-	["elseif"] = true,
-	["end"] = true,
-	["export"] = true,
-	["false"] = true,
-	["for"] = true,
-	["function"] = true,
-	["if"] = true,
-	["in"] = true,
-	["local"] = true,
-	["nil"] = true,
-	["not"] = true,
-	["or"] = true,
-	["repeat"] = true,
-	["return"] = true,
-	["then"] = true,
-	["true"] = true,
-	["type"] = true,
-	["until"] = true,
-	["while"] = true,
-}
-
 local function safeTypeof(value)
 	if type(typeof) == "function" then
 		local ran, valueType = pcall(typeof, value)
@@ -134,6 +107,15 @@ local function getInstanceExpression(instance)
 		return "game"
 	end
 
+	local localPlayer
+	local playersRan, players = pcall(game.GetService, game, "Players")
+
+	if playersRan and players then
+		pcall(function()
+			localPlayer = players.LocalPlayer
+		end)
+	end
+
 	local ancestry = {}
 	local seen = {}
 	local current = instance
@@ -178,6 +160,8 @@ local function getInstanceExpression(instance)
 
 		if isService then
 			expression = expression .. ":GetService(" .. quoteString(className) .. ")"
+		elseif object == localPlayer then
+			expression = expression .. ".LocalPlayer"
 		elseif nameRan and type(name) == "string" then
 			expression = expression .. "[" .. quoteString(name) .. "]"
 		else
@@ -189,6 +173,8 @@ local function getInstanceExpression(instance)
 end
 
 local function makeState()
+	local maxOutputBytes = settingNumber("MaxGeneratedOutputBytes", 16384, 8388608)
+
 	return {
 		ids = {},
 		order = {},
@@ -201,7 +187,10 @@ local function makeState()
 		maxDepth = settingNumber("MaxGeneratedTableDepth", 1, 64),
 		maxStringBytes = settingNumber("MaxGeneratedStringBytes", 256, 1048576),
 		maxBufferBytes = settingNumber("MaxGeneratedBufferBytes", 256, 1048576),
-		maxOutputBytes = settingNumber("MaxGeneratedOutputBytes", 16384, 8388608),
+		maxOutputBytes = maxOutputBytes,
+		maxCollectedEntries = math.max(8, math.floor(maxOutputBytes / 48)),
+		collectedEntries = 0,
+		outputBytes = 0,
 	}
 end
 
@@ -241,9 +230,17 @@ local function readEntries(value, state)
 				("A table was truncated after %d entries to keep generation responsive."):format(state.maxEntries)
 			)
 			break
+		elseif state.collectedEntries >= state.maxCollectedEntries then
+			addWarning(
+				state,
+				"table-graph-output-budget",
+				"The captured table graph was truncated before it could exceed the generated-output budget."
+			)
+			break
 		end
 
 		entries[#entries + 1] = { key, child }
+		state.collectedEntries = state.collectedEntries + 1
 		previous = key
 	end
 
@@ -347,7 +344,13 @@ local function makeSerializer(state)
 			elseif valueType == "DateTime" then
 				return ("DateTime.fromUnixTimestampMillis(%s)"):format(serializeNumber(value.UnixTimestampMillis))
 			elseif valueType == "EnumItem" then
-				return ("Enum[%s][%s]"):format(quoteString(value.EnumType.Name), quoteString(value.Name))
+				local enumTypeName = tostring(value.EnumType):match("^Enum%.(.+)$")
+
+				if not enumTypeName then
+					error("Enum type name is unavailable")
+				end
+
+				return ("Enum[%s][%s]"):format(quoteString(enumTypeName), quoteString(value.Name))
 			elseif valueType == "Vector3" then
 				return ("Vector3.new(%s, %s, %s)"):format(
 					serializeNumber(value.X),
@@ -470,18 +473,36 @@ local function makeSerializer(state)
 	return serialize
 end
 
+local function appendLine(lines, state, line)
+	line = tostring(line or "")
+
+	if state.outputBytes + #line + 1 > state.maxOutputBytes then
+		return false
+	end
+
+	state.outputBytes = state.outputBytes + #line + 1
+	lines[#lines + 1] = line
+	return true
+end
+
 local function emitTables(lines, state, serialize)
 	if #state.order == 0 then
-		return
+		return true
 	end
 
-	lines[#lines + 1] = "-- Table locals preserve cyclic and shared references."
+	if not appendLine(lines, state, "-- Table locals preserve cyclic and shared references.") then
+		return false
+	end
 
 	for id = 1, #state.order do
-		lines[#lines + 1] = ("local OH_Table_%d = {}"):format(id)
+		if not appendLine(lines, state, ("local OH_Table_%d = {}"):format(id)) then
+			return false
+		end
 	end
 
-	lines[#lines + 1] = ""
+	if not appendLine(lines, state, "") then
+		return false
+	end
 
 	for id, tableValue in ipairs(state.order) do
 		for _, entry in ipairs(readEntries(tableValue, state)) do
@@ -489,12 +510,18 @@ local function emitTables(lines, state, serialize)
 			local valueExpression = serialize(entry[2], false)
 
 			if keySupported and keyExpression then
-				lines[#lines + 1] = ("OH_Table_%d[%s] = %s"):format(id, keyExpression, valueExpression or "nil")
+				if not appendLine(
+					lines,
+					state,
+					("OH_Table_%d[%s] = %s"):format(id, keyExpression, valueExpression or "nil")
+				) then
+					return false
+				end
 			end
 		end
 	end
 
-	lines[#lines + 1] = ""
+	return appendLine(lines, state, "")
 end
 
 local function buildRemoteScript(remoteInstance, method, args, callInfo)
@@ -517,7 +544,8 @@ local function buildRemoteScript(remoteInstance, method, args, callInfo)
 	end
 
 	local serialize = makeSerializer(state)
-	local body = {
+	local body = {}
+	local prelude = {
 		"local OH_Unpack = table.unpack or unpack",
 		"local OH_Remote = " .. remotePath,
 		("local OH_Args = table.create and table.create(%d) or {}"):format(argCount),
@@ -525,15 +553,29 @@ local function buildRemoteScript(remoteInstance, method, args, callInfo)
 		"",
 	}
 
-	emitTables(body, state, serialize)
+	for _, line in ipairs(prelude) do
+		if not appendLine(body, state, line) then
+			return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
+		end
+	end
+
+	if not emitTables(body, state, serialize) then
+		return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
+	end
 
 	for index = 1, argCount do
 		local expression = serialize(args[index], false)
-		body[#body + 1] = ("OH_Args[%d] = %s"):format(index, expression or "nil")
+
+		if not appendLine(body, state, ("OH_Args[%d] = %s"):format(index, expression or "nil")) then
+			return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
+		end
 	end
 
-	body[#body + 1] = ""
-	body[#body + 1] = ("return OH_Remote:%s(OH_Unpack(OH_Args, 1, OH_Args.n))"):format(method)
+	if not appendLine(body, state, "")
+		or not appendLine(body, state, ("return OH_Remote:%s(OH_Unpack(OH_Args, 1, OH_Args.n))"):format(method))
+	then
+		return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
+	end
 
 	local header = {
 		"-- Generated by Hydroxide RemoteSpy",

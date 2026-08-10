@@ -128,6 +128,25 @@ local destroyedInstance = makeObject({
     Parent = nil
 }, "Ghost")
 
+local specialChild = makeObject({
+    __type = "Instance",
+    Name = 'end"\\\n' .. string.char(0xC3, 0xA9),
+    ClassName = "Folder",
+    Parent = workspaceObject
+}, "SpecialChild")
+
+local pathWaypoint = makeObject({
+    __type = "PathWaypoint",
+    Position = makeObject({
+        __type = "Vector3",
+        X = 1,
+        Y = 2,
+        Z = 3
+    }, "1, 2, 3"),
+    Action = "Enum.PathWaypointAction.Walk",
+    Label = 'a"b'
+}, "PathWaypoint")
+
 local fakeBuffer = makeObject({
     __type = "buffer",
     bytes = "A\0B"
@@ -153,9 +172,22 @@ assertEqual(
     "DateTime.fromUnixTimestampMillis(" .. tostring(dateTime.UnixTimestampMillis) .. ")",
     "DateTime serialization"
 )
-assertEqual(dataToString(fakeBuffer), 'buffer.fromstring("A\\0B")', "buffer serialization")
+assertEqual(dataToString(fakeBuffer), 'buffer.fromstring("A\\000B")', "buffer serialization")
 assertEqual(toUnicode(string.char(0xC3, 0xA9)), "utf8.char(233)", "unicode serialization")
-assertEqual(getInstancePath(destroyedInstance), '.Ghost --[[ PARENTED TO NIL OR DESTROYED ]]', "destroyed instance path")
+assertEqual(
+    getInstancePath(destroyedInstance),
+    "nil --[[ Detached or destroyed Instance: Ghost ]]",
+    "destroyed instance path is valid code"
+)
+assertContains(getInstancePath(specialChild), 'game:GetService("Workspace")["end\\"\\\\\\n\\195\\169"]', "safe path quoting")
+assertContains(userdataValue(pathWaypoint), '"a\\"b"', "PathWaypoint label quoting")
+assertEqual(dataToString(math.huge), "math.huge", "positive infinity serialization")
+assertEqual(dataToString(-math.huge), "-math.huge", "negative infinity serialization")
+assertEqual(dataToString(0 / 0), "(0 / 0)", "NaN serialization")
+
+local binaryString = 'A"\\\0\n' .. string.char(0xFF)
+local binaryChunk = assert(load("return " .. dataToString(binaryString)))
+assertEqual(binaryChunk(), binaryString, "binary-safe string serialization")
 assertContains(tableToString(cyclic), "OH_CYCLIC_PROTECTION", "cyclic table protection")
 assertEqual(#summarizeValue(string.rep("x", 200), 48) <= 48, true, "string preview is bounded")
 assertContains(summarizeValue({ one = 1, two = 2 }), "2 entries", "table preview avoids full serialization")

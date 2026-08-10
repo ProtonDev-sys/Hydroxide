@@ -120,7 +120,18 @@ function ActionPanel.Install(container, results, options)
 		local row = math.floor((index - 1) / columns)
 
 		configureButton(button, action, buttonWidth, buttonHeight)
-		button.Position = UDim2.new(0, column * (buttonWidth + gap), 0, ACTIONS_TOP + row * (buttonHeight + gap))
+
+		if not action.Width then
+			button.Size = UDim2.new(1 / columns, -(gap * (columns - 1) / columns), 0, buttonHeight)
+			button.Position = UDim2.new(
+				column / columns,
+				column * gap / columns,
+				0,
+				ACTIONS_TOP + row * (buttonHeight + gap)
+			)
+		else
+			button.Position = UDim2.new(0, column * (buttonWidth + gap), 0, ACTIONS_TOP + row * (buttonHeight + gap))
+		end
 
 		panel.Enabled[action.Name] = false
 		if type(action.Callback) == "function" then

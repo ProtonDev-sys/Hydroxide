@@ -10,7 +10,7 @@ local isLClosure = islclosure or is_l_closure or (iscclosure and function(closur
     return not iscclosure(closure)
 end)
 
-assert(getGc and getInfo and getConstants and isXClosure, "Your exploit is not supported")
+assert(getGc and getInfo and getUpvalue and getConstants and isXClosure, "Your exploit is not supported")
 
 local placeholderUserdataConstant = newproxy(false)
 
@@ -99,13 +99,23 @@ local function searchClosure(script, name, upvalueIndex, constants)
             matchesScript = parentScript == nil or parentScript.Parent == nil
         end
 
-        if matchesScript and pcall(getUpvalue, closure, upvalueIndex) then
-            local infoRan, info = pcall(getInfo, closure, "n")
+        if matchesScript then
+            local infoRan, info = pcall(getInfo, closure)
             local closureName = infoRan and info and info.name or ""
+            local upvalueCount = infoRan and info and tonumber(info.nups)
+            local hasUpvalue = upvalueCount and upvalueIndex >= 1 and upvalueIndex <= upvalueCount
 
-            if ((name and name ~= "Unnamed function") and closureName == name) and matchConstants(closure, constants) then
+            if not hasUpvalue and upvalueCount == nil then
+                local upvalueRan, upvalue = pcall(getUpvalue, closure, upvalueIndex)
+                hasUpvalue = upvalueRan and upvalue ~= nil
+            end
+
+            if hasUpvalue
+                and ((name and name ~= "Unnamed function") and closureName == name)
+                and matchConstants(closure, constants)
+            then
                 return closure
-            elseif (not name or name == "Unnamed function") and matchConstants(closure, constants) then
+            elseif hasUpvalue and (not name or name == "Unnamed function") and matchConstants(closure, constants) then
                 return closure
             end
         end

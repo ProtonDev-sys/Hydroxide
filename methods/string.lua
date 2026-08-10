@@ -1,20 +1,49 @@
 local methods = {}
 
-local escapeCharacters = {
-    ["\\"] = "\\\\",
-    ["\""] = "\\\"",
-    ["\0"] = "\\0",
-    ["\n"] = "\\n",
-    ["\t"] = "\\t",
-    ["\f"] = "\\f",
-    ["\r"] = "\\r",
-    ["\v"] = "\\v",
-    ["\a"] = "\\a",
-    ["\b"] = "\\b"
-}
-
 local function escapeString(value)
-    return value:gsub("[%c%z\\\"]", escapeCharacters)
+    local parts = {}
+
+    for index = 1, #value do
+        local byte = value:byte(index)
+
+        if byte == 34 then
+            parts[#parts + 1] = '\\"'
+        elseif byte == 92 then
+            parts[#parts + 1] = "\\\\"
+        elseif byte == 7 then
+            parts[#parts + 1] = "\\a"
+        elseif byte == 8 then
+            parts[#parts + 1] = "\\b"
+        elseif byte == 9 then
+            parts[#parts + 1] = "\\t"
+        elseif byte == 10 then
+            parts[#parts + 1] = "\\n"
+        elseif byte == 11 then
+            parts[#parts + 1] = "\\v"
+        elseif byte == 12 then
+            parts[#parts + 1] = "\\f"
+        elseif byte == 13 then
+            parts[#parts + 1] = "\\r"
+        elseif byte < 32 or byte > 126 then
+            parts[#parts + 1] = ("\\%03d"):format(byte)
+        else
+            parts[#parts + 1] = string.char(byte)
+        end
+    end
+
+    return table.concat(parts)
+end
+
+local function numberToString(value)
+    if value ~= value then
+        return "(0 / 0)"
+    elseif value == math.huge then
+        return "math.huge"
+    elseif value == -math.huge then
+        return "-math.huge"
+    end
+
+    return tostring(value)
 end
 
 local function isBuffer(value, valueType)
@@ -74,7 +103,9 @@ local function dataToString(data)
         end
 
         return userdataValue(data)
-    elseif rawType == "boolean" or rawType == "number" or rawType == "nil" then
+    elseif rawType == "number" then
+        return numberToString(data)
+    elseif rawType == "boolean" or rawType == "nil" then
         return tostring(data)
     end
 

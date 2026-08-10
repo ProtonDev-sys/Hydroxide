@@ -10,6 +10,10 @@ local settings = type(oh.Settings) == "table" and oh.Settings or {}
 local captureExecutorCalls = settings.CaptureExecutorCalls ~= false
 local captureCallStacks = settings.CaptureCallStacks ~= false
 local maxStackFrames = math.max(1, math.floor(tonumber(settings.MaxStackFrames) or 24))
+local maxStackCapturesPerSecond = math.max(
+    1,
+    math.min(1000, math.floor(tonumber(settings.MaxStackCapturesPerSecond) or 60))
+)
 local maxRemoteLogs = math.max(1, math.floor(tonumber(settings.MaxRemoteLogs) or 500))
 local internalFunctions = setmetatable({}, { __mode = "k" })
 
@@ -48,6 +52,9 @@ local diagnostics = {
     CallsSkippedUnknownCaller = 0,
     ExecutorCallsSkipped = 0,
     LogsDropped = 0,
+    RemotesDisposed = 0,
+    StackCaptures = 0,
+    StackCapturesRateLimited = 0,
     DirectHookAttempts = 0,
     DirectHooksInstalled = 0,
     DirectHookFailures = 0,
@@ -61,7 +68,7 @@ local diagnostics = {
     LastHookError = nil
 }
 
-local currentRemotes = {}
+local currentRemotes = setmetatable({}, { __mode = "k" })
 local remoteDataEvent = Instance.new("BindableEvent")
 local eventSet = false
 
@@ -116,6 +123,30 @@ local function ensureRemote(instance)
     if not remote then
         remote = Remote.new(instance, maxRemoteLogs)
         currentRemotes[instance] = remote
+
+        local destroyingConnection
+        local connected, connection = pcall(function()
+            return instance.Destroying:Connect(function()
+                if currentRemotes[instance] == remote then
+                    currentRemotes[instance] = nil
+                    diagnostics.RemotesDisposed = diagnostics.RemotesDisposed + 1
+                end
+
+                if destroyingConnection then
+                    pcall(function()
+                        destroyingConnection:Disconnect()
+                    end)
+                    destroyingConnection = nil
+                    remote.DestroyingConnection = nil
+                end
+            end)
+        end)
+
+        if connected and connection then
+            destroyingConnection = connection
+            remote.DestroyingConnection = connection
+            oh.Events[#oh.Events + 1] = connection
+        end
     end
 
     return remote
@@ -296,7 +327,7 @@ local function safeGetInfo()
     end
 
     for stackLevel = 1, maxStackFrames + 16 do
-        local ran, info = pcall(getInfo, stackLevel, "fnSl")
+        local ran, info = pcall(getInfo, stackLevel, "fnsl")
 
         if not ran then
             ran, info = pcall(getInfo, stackLevel)
@@ -340,9 +371,50 @@ local function filterCallStack(stack)
     return frames
 end
 
+local stackCaptureBudget = {
+    Tokens = math.min(maxStackCapturesPerSecond, 8),
+    UpdatedAt = 0
+}
+
+local function reserveStackCapture()
+    if not os or type(os.clock) ~= "function" then
+        return true
+    end
+
+    local ran, now = pcall(os.clock)
+
+    if not ran or type(now) ~= "number" then
+        return true
+    end
+
+    local elapsed = math.max(0, now - stackCaptureBudget.UpdatedAt)
+    local burst = math.min(maxStackCapturesPerSecond, 8)
+
+    stackCaptureBudget.UpdatedAt = now
+    stackCaptureBudget.Tokens = math.min(
+        burst,
+        stackCaptureBudget.Tokens + elapsed * maxStackCapturesPerSecond
+    )
+
+    if stackCaptureBudget.Tokens < 1 then
+        diagnostics.StackCapturesRateLimited = diagnostics.StackCapturesRateLimited + 1
+        return false
+    end
+
+    stackCaptureBudget.Tokens = stackCaptureBudget.Tokens - 1
+    diagnostics.StackCaptures = diagnostics.StackCaptures + 1
+    return true
+end
+
 local function safeGetCallStack(offThread)
-    if not captureCallStacks or not getCallStack or offThread then
+    if offThread then
+        return nil, "OTH callbacks run off-thread; a structured stack is unavailable"
+    elseif not captureCallStacks then
+        return nil, "Stack capture is disabled by configuration"
+    elseif not getCallStack then
         return nil
+    elseif not reserveStackCapture() then
+        return nil, "Stack snapshot skipped by the performance rate limit"
     end
 
     local ran, stack = pcall(getCallStack, 0)
@@ -356,10 +428,10 @@ local function safeGetCallStack(offThread)
 end
 
 local function buildCall(vargs, capture)
-    local stack = safeGetCallStack(capture.OffThread)
+    local stack, stackLimitation = safeGetCallStack(capture.OffThread)
     local info = stack and type(stack[1]) == "table" and stack[1] or nil
 
-    if not info and not capture.OffThread then
+    if not info and not capture.OffThread and not stackLimitation then
         info = safeGetInfo()
     end
 
@@ -371,9 +443,7 @@ local function buildCall(vargs, capture)
 
     local limitation
 
-    if capture.OffThread then
-        limitation = "OTH callbacks run off-thread; the original function and call stack are unavailable"
-    end
+    limitation = stackLimitation
 
     return {
         script = script,

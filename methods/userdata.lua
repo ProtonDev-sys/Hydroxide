@@ -4,7 +4,38 @@ local players = game:GetService("Players")
 local client = players and players.LocalPlayer
 
 local function quoteString(value)
-    return dataToString(value)
+    local parts = { '"' }
+
+    for index = 1, #value do
+        local byte = value:byte(index)
+
+        if byte == 34 then
+            parts[#parts + 1] = '\\"'
+        elseif byte == 92 then
+            parts[#parts + 1] = "\\\\"
+        elseif byte == 7 then
+            parts[#parts + 1] = "\\a"
+        elseif byte == 8 then
+            parts[#parts + 1] = "\\b"
+        elseif byte == 9 then
+            parts[#parts + 1] = "\\t"
+        elseif byte == 10 then
+            parts[#parts + 1] = "\\n"
+        elseif byte == 11 then
+            parts[#parts + 1] = "\\v"
+        elseif byte == 12 then
+            parts[#parts + 1] = "\\f"
+        elseif byte == 13 then
+            parts[#parts + 1] = "\\r"
+        elseif byte < 32 or byte > 126 then
+            parts[#parts + 1] = ("\\%03d"):format(byte)
+        else
+            parts[#parts + 1] = string.char(byte)
+        end
+    end
+
+    parts[#parts + 1] = '"'
+    return table.concat(parts)
 end
 
 local function joinValues(values)
@@ -18,37 +49,67 @@ local function joinValues(values)
 end
 
 local function getInstancePath(instance)
-    local name = instance.Name
-    local head = (#name > 0 and "." .. name) or "['']"
-
-    if not instance.Parent and instance ~= game then
-        return head .. " --[[ PARENTED TO NIL OR DESTROYED ]]"
-    end
-
     if instance == game then
         return "game"
-    elseif instance == workspace then
-        return "workspace"
-    else
-        local _, service = pcall(game.GetService, game, instance.ClassName)
+    elseif typeof(instance) ~= "Instance" then
+        return "nil --[[ Value is not an Instance ]]"
+    end
 
-        if service == instance then
-            head = ':GetService("' .. instance.ClassName .. '")'
-        elseif instance == client then
-            head = ".LocalPlayer"
+    local ancestry = {}
+    local seen = {}
+    local current = instance
+
+    while current ~= game do
+        if seen[current] or #ancestry >= 128 then
+            return "nil --[[ Invalid or cyclic Instance path ]]"
+        end
+
+        seen[current] = true
+        ancestry[#ancestry + 1] = current
+
+        local parentRan, parent = pcall(function()
+            return current.Parent
+        end)
+
+        if not parentRan or parent == nil then
+            local nameRan, name = pcall(function()
+                return current.Name
+            end)
+            local description = nameRan and tostring(name):gsub("[%c]", " ") or "unknown"
+            return "nil --[[ Detached or destroyed Instance: " .. description:gsub("%]%]", "] ]") .. " ]]"
+        end
+
+        current = parent
+    end
+
+    local path = "game"
+
+    for index = #ancestry, 1, -1 do
+        local object = ancestry[index]
+        local nameRan, name = pcall(function()
+            return object.Name
+        end)
+        local classRan, className = pcall(function()
+            return object.ClassName
+        end)
+        local serviceRan, service = false, nil
+
+        if index == #ancestry and classRan and type(className) == "string" then
+            serviceRan, service = pcall(game.GetService, game, className)
+        end
+
+        if serviceRan and service == object then
+            path = path .. ":GetService(" .. quoteString(className) .. ")"
+        elseif object == client then
+            path = path .. ".LocalPlayer"
+        elseif nameRan and type(name) == "string" then
+            path = path .. "[" .. quoteString(name) .. "]"
         else
-            local nonAlphaNum = name:gsub("[%w_]", "")
-            local noPunctuation = nonAlphaNum:gsub("[%s%p]", "")
-
-            if tonumber(name:sub(1, 1)) or (#nonAlphaNum ~= 0 and #noPunctuation == 0) then
-                head = '["' .. name:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"]'
-            elseif #nonAlphaNum ~= 0 and #noPunctuation > 0 then
-                head = "[" .. toUnicode(name) .. "]"
-            end
+            return "nil --[[ Unreadable Instance path ]]"
         end
     end
 
-    return getInstancePath(instance.Parent) .. head
+    return path
 end
 
 local function bufferValue(data)
@@ -81,7 +142,7 @@ local function userdataValue(data)
     if dataType == "buffer" then
         return bufferValue(data)
     elseif dataType == "userdata" then
-        return "aux.placeholderUserdataConstant"
+        return "nil --[[ unsupported userdata ]]"
     elseif dataType == "Instance" then
         return getInstancePath(data)
     elseif dataType == "BrickColor" then
@@ -112,7 +173,7 @@ local function userdataValue(data)
         return ("PathWaypoint.new(%s, %s, %s)"):format(
             dataToString(data.Position),
             tostring(data.Action),
-            tostring(data.Label or '""')
+            quoteString(data.Label or "")
         )
     elseif dataType == "PhysicalProperties" then
         return ("PhysicalProperties.new(%s)"):format(joinValues({
@@ -156,7 +217,7 @@ local function userdataValue(data)
             tostring(data.Max.Y)
         )
     elseif dataType == "Axes" or dataType == "Faces" or dataType == "Random" or dataType == "RaycastParams" then
-        return dataType .. ".new(" .. tostring(data) .. ")"
+        return "nil --[[ unsupported " .. dataType .. " value ]]"
     end
 
     return tostring(data)

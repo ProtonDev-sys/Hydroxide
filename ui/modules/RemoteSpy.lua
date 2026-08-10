@@ -113,8 +113,8 @@ local remoteList = List.new(ListResults, true)
 local remoteLogs = List.new(LogsResults)
 local remoteConditions = List.new(ConditionsResults, true)
 
-local currentLogs = {}
-local removed = {}
+local currentLogs = setmetatable({}, { __mode = "k" })
+local removed = setmetatable({}, { __mode = "k" })
 
 local selected = {
 	logs = {},
@@ -388,7 +388,7 @@ local function describeFunction(func)
 	end
 
 	local lines = {}
-	local ran, info = pcall(getInfo, func, "nSlu")
+	local ran, info = pcall(getInfo, func)
 	info = ran and info or nil
 
 	lines[#lines + 1] = "Function: " .. argumentSummary(func)
@@ -839,6 +839,20 @@ function Log.new(remote)
 	log.IncrementCalls = Log.incrementCalls
 	log.Decrementcalls = Log.decrementCalls
 	log.Remove = Log.remove
+
+	local destroyingRan, destroyingConnection = pcall(function()
+		return remoteInstance.Destroying:Connect(function()
+			if currentLogs[remoteInstance] == log then
+				log:Remove(true)
+			end
+		end)
+	end)
+
+	if destroyingRan and destroyingConnection then
+		log.DestroyingConnection = destroyingConnection
+		oh.Events[#oh.Events + 1] = destroyingConnection
+	end
+
 	return log
 end
 
@@ -1052,8 +1066,16 @@ function Log.decrementCalls(log, args)
 	queueCountUpdate(log)
 end
 
-function Log.remove(log)
+function Log.remove(log, destroyed)
 	local remoteInstance = log.Remote.Instance
+	local destroyingConnection = log.DestroyingConnection
+
+	if destroyingConnection then
+		pcall(function()
+			destroyingConnection:Disconnect()
+		end)
+		log.DestroyingConnection = nil
+	end
 
 	if selected.remoteLog == log then
 		resetRenderedCalls()
@@ -1063,6 +1085,10 @@ function Log.remove(log)
 	log.Button:Remove()
 	currentLogs[remoteInstance] = nil
 	removed[remoteInstance] = true
+
+	if destroyed then
+		currentRemotes[remoteInstance] = nil
+	end
 end
 
 -- UI Functionality

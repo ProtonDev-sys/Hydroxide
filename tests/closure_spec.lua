@@ -40,7 +40,8 @@ _G.oh = {
     Settings = {
         CaptureCallStacks = true,
         MaxClosureLogs = 2,
-        MaxStackFrames = 8
+        MaxStackFrames = 8,
+        MaxStackCapturesPerSecond = 1
     }
 }
 _G.isLClosure = function(value)
@@ -167,6 +168,7 @@ assertEqual(hook.Calls, 3, "ignored call is not captured")
 hook.IgnoredArgs = {}
 hook:BlockArg(2, "nil", true)
 wrapper("condition-blocked", nil)
+local conditionBlockedCall = hook.Logs[#hook.Logs]
 assertEqual(originalCalls, 3, "nil argument block skips original")
 assertEqual(hook.Calls, 4, "argument-blocked call is captured")
 assertEqual(hook.DroppedLogs, 2, "retention remains bounded")
@@ -178,6 +180,11 @@ assertEqual(errorMessage:find("target exploded", 1, true) ~= nil, true, "target 
 assertEqual(errorCall.completed, true, "errored closure call is marked complete")
 assertEqual(errorCall.forwarded, false, "errored closure call is not marked forwarded")
 assertEqual(errorCall.error:find("target exploded", 1, true) ~= nil, true, "errored closure call retains error")
+assertEqual(ClosureSpy.Diagnostics.StackCapturesRateLimited > 0, true, "closure stack capture budget is enforced")
+
+hook:DecrementCalls(errorCall)
+assertEqual(#hook.Logs, 1, "closure circular history removes a logical entry")
+assertEqual(hook.Logs[1], conditionBlockedCall, "closure history preserves order after removal")
 
 assertEqual(hook:Remove(), true, "hook removal succeeds")
 assertEqual(closure.Data, target, "closure target restored")

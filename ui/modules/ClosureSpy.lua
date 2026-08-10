@@ -327,7 +327,7 @@ local function describeFunction(func)
 	end
 
 	local lines = {}
-	local ran, info = pcall(getInfo, func, "nSlu")
+	local ran, info = pcall(getInfo, func)
 	info = ran and info or nil
 
 	lines[#lines + 1] = "Function: " .. argumentSummary(func)
@@ -411,6 +411,10 @@ local function describeCallStack(call)
 
 	if call.error then
 		table.insert(lines, #lines, "Error: " .. tostring(call.error))
+	end
+
+	if caller.limitation then
+		table.insert(lines, #lines, "Capture note: " .. tostring(caller.limitation))
 	end
 
 	if type(call.chain) == "table" and #call.chain > 0 then

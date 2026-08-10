@@ -55,6 +55,11 @@ end
 local replicatedStorage = makeInstance("ReplicatedStorage", "ReplicatedStorage", gameObject)
 gameObject.Services.ReplicatedStorage = replicatedStorage
 
+local players = makeInstance("Players", "Players", gameObject)
+local localPlayer = makeInstance("Player", "ExampleUser", players)
+players.LocalPlayer = localPlayer
+gameObject.Services.Players = players
+
 local remote = makeInstance("RemoteFunction", "Replay", replicatedStorage)
 local captured
 
@@ -138,6 +143,31 @@ assertEqual(captured[3] ~= captured[3], true, "NaN")
 assertEqual(captured[4], specialString, "binary-safe string")
 assertEqual(captured[5], false, "boolean argument")
 
+local enumType = setmetatable({ Name = "Material" }, {
+	__tostring = function()
+		return "Enum.Material"
+	end,
+})
+local enumItem = {
+	__type = "EnumItem",
+	EnumType = enumType,
+	Name = "Plastic",
+}
+_G.Enum = {
+	Material = {
+		Plastic = enumItem,
+	},
+}
+
+compileAndRun(assert(builder.buildRemoteScript(remote, "FireServer", { n = 1, enumItem })))
+assertEqual(captured[1], enumItem, "EnumItem path uses its documented Enum type string")
+
+local backpack = makeInstance("Backpack", "Backpack", localPlayer)
+local playerRemote = makeInstance("RemoteEvent", "PlayerRemote", backpack)
+local playerSource = assert(builder.buildRemoteScript(playerRemote, "FireServer", { n = 0 }))
+assertContains(playerSource, 'game:GetService("Players").LocalPlayer["Backpack"]["PlayerRemote"]', "local player path")
+assertNotContains(playerSource, "ExampleUser", "local player path does not bake in the account name")
+
 local specialName = 'end"\\\n' .. string.char(0xC3, 0xA9)
 local specialRemote = makeInstance("RemoteEvent", specialName, replicatedStorage)
 
@@ -199,5 +229,20 @@ compileAndRun(limitedSource)
 assertEqual(captured[3].safe, true, "raw next bypasses hostile __pairs")
 assertEqual(captured[4], nil, "oversized string becomes nil")
 assertEqual(captured[5], nil, "oversized buffer becomes nil")
+
+_G.oh.Settings.MaxGeneratedTableEntries = 5000
+_G.oh.Settings.MaxGeneratedTableDepth = 16
+_G.oh.Settings.MaxGeneratedTables = 512
+_G.oh.Settings.MaxGeneratedOutputBytes = 16384
+
+local outputHeavy = {}
+
+for index = 1, 200 do
+	outputHeavy[index] = string.rep("x", 200)
+end
+
+local oversizedOutput, outputError = builder.buildRemoteScript(remote, "FireServer", { n = 1, outputHeavy })
+assertEqual(oversizedOutput, nil, "output limit aborts generation before an oversized script is retained")
+assertContains(outputError, "output limit", "output limit reports a controlled error")
 
 print("scriptbuilder_spec.lua: ok")

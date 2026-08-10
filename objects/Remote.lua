@@ -2,6 +2,92 @@ local Remote = {}
 
 local DEFAULT_MAX_LOGS = 500
 
+local function createLogBuffer(capacity)
+    local storage = {}
+    local head = 1
+    local count = 0
+    local methods = {}
+    local proxy = {}
+
+    local function physicalIndex(logicalIndex)
+        return ((head + logicalIndex - 2) % capacity) + 1
+    end
+
+    function methods.Push(_, value)
+        if count < capacity then
+            count = count + 1
+            storage[physicalIndex(count)] = value
+            return nil
+        end
+
+        local dropped = storage[head]
+        storage[head] = value
+        head = (head % capacity) + 1
+        return dropped
+    end
+
+    function methods.Remove(_, target)
+        local found
+
+        for logicalIndex = 1, count do
+            if storage[physicalIndex(logicalIndex)] == target then
+                found = logicalIndex
+                break
+            end
+        end
+
+        if not found then
+            return false
+        end
+
+        for logicalIndex = found, count - 1 do
+            storage[physicalIndex(logicalIndex)] = storage[physicalIndex(logicalIndex + 1)]
+        end
+
+        storage[physicalIndex(count)] = nil
+        count = count - 1
+
+        if count == 0 then
+            head = 1
+        end
+
+        return true
+    end
+
+    function methods.Clear()
+        storage = {}
+        head = 1
+        count = 0
+    end
+
+    local function iterate()
+        local logicalIndex = 0
+
+        return function()
+            logicalIndex = logicalIndex + 1
+
+            if logicalIndex <= count then
+                return logicalIndex, storage[physicalIndex(logicalIndex)]
+            end
+        end
+    end
+
+    return setmetatable(proxy, {
+        __len = function()
+            return count
+        end,
+        __index = function(_, key)
+            if type(key) == "number" and key >= 1 and key <= count and key % 1 == 0 then
+                return storage[physicalIndex(key)]
+            end
+
+            return methods[key]
+        end,
+        __iter = iterate,
+        __pairs = iterate
+    })
+end
+
 local function normalizeMaxLogs(value)
     value = tonumber(value)
 
@@ -24,11 +110,11 @@ function Remote.new(instance, maxLogs)
     local remote = {}
 
     remote.Instance = instance
-    remote.Logs = {}
+    remote.MaxLogs = normalizeMaxLogs(maxLogs)
+    remote.Logs = createLogBuffer(remote.MaxLogs)
     remote.Calls = 0
     remote.TotalCalls = 0
     remote.DroppedCalls = 0
-    remote.MaxLogs = normalizeMaxLogs(maxLogs)
     remote.Blocked = false
     remote.Ignored = false
     remote.Clear = Remote.clear
@@ -54,7 +140,7 @@ function Remote.clear(remote)
     remote.Calls = 0
     remote.TotalCalls = 0
     remote.DroppedCalls = 0
-    remote.Logs = {}
+    remote.Logs:Clear()
 end
 
 function Remote.setBlocked(remote, blocked)
@@ -160,10 +246,9 @@ function Remote.incrementCalls(remote, call)
 
     remote.Calls = remote.Calls + 1
     remote.TotalCalls = remote.TotalCalls + 1
-    logs[#logs + 1] = call
+    local droppedCall = logs:Push(call)
 
-    if #logs > remote.MaxLogs then
-        table.remove(logs, 1)
+    if droppedCall ~= nil then
         remote.DroppedCalls = remote.DroppedCalls + 1
         dropped = true
     end
@@ -173,10 +258,7 @@ end
 
 function Remote.decrementCalls(remote, call)
     local logs = remote.Logs
-    local index = table.find(logs, call)
-
-    if index then
-        table.remove(logs, index)
+    if logs:Remove(call) then
         remote.Calls = math.max(0, remote.Calls - 1)
     end
 end

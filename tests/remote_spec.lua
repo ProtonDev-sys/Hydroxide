@@ -38,6 +38,11 @@ assertEqual(#remote.Logs, 2, "bounded log count")
 assertEqual(remote.Logs[1], second, "oldest log evicted")
 assertEqual(remote.Logs[2], third, "newest log retained")
 
+remote:DecrementCalls(second)
+assertEqual(#remote.Logs, 1, "circular history removes a logical entry")
+assertEqual(remote.Logs[1], third, "circular history preserves order after removal")
+assertEqual(remote.Calls, 2, "removing a retained call decrements the visible call count")
+
 remote:BlockArg(2, "nil", true)
 remote:IgnoreArg(3, "number", true)
 
@@ -100,7 +105,8 @@ do
             __instance = true,
             ClassName = className,
             Name = className,
-            _listeners = {}
+            _listeners = {},
+            _destroyListeners = {}
         }
 
         instance.Event = {
@@ -111,11 +117,25 @@ do
                 }
             end
         }
+        instance.Destroying = {
+            Connect = function(_, callback)
+                instance._destroyListeners[#instance._destroyListeners + 1] = callback
+                return {
+                    Disconnect = function() end
+                }
+            end
+        }
 
         return setmetatable(instance, {
             __index = function(_, key)
                 if key == "Destroy" then
-                    return function() end
+                    return function()
+                        for _, callback in ipairs(instance._destroyListeners) do
+                            callback()
+                        end
+
+                        instance._destroyListeners = {}
+                    end
                 end
 
                 return methods[key]
@@ -147,6 +167,7 @@ do
         Settings = {
             CaptureExecutorCalls = false,
             CaptureCallStacks = true,
+            MaxStackCapturesPerSecond = 1,
             MaxRemoteLogs = 2
         }
     }
@@ -329,12 +350,17 @@ do
     namecallWrapper(event, "retained")
     assertEqual(#eventModel.Logs, 2, "RemoteSpy applies configured retention bound")
     assertEqual(RemoteSpy.Diagnostics.LogsDropped, 1, "retention eviction diagnosed")
+    assertEqual(RemoteSpy.Diagnostics.StackCapturesRateLimited > 0, true, "remote stack capture budget is enforced")
 
     currentNamecallMethod = "InvokeServer"
     local remoteFunction = newInstance("RemoteFunction")
     local invokeResult = namecallWrapper(remoteFunction, "request")
     assertEqual(invokeResult, "remote-function-result", "RemoteFunction result preserved")
     assertEqual(RemoteSpy.CurrentRemotes[remoteFunction].TotalCalls, 1, "RemoteFunction captured")
+
+    event:Destroy()
+    assertEqual(RemoteSpy.CurrentRemotes[event], nil, "destroyed remotes are released from backend history")
+    assertEqual(RemoteSpy.Diagnostics.RemotesDisposed, 1, "destroyed remote cleanup is diagnosed")
 
     print("remote_spy backend: ok")
 end

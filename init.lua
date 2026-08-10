@@ -29,6 +29,7 @@ local runtimeSettings = {
     CaptureExecutorCalls = config.captureExecutorCalls ~= false,
     CaptureCallStacks = config.captureCallStacks ~= false,
     MaxStackFrames = numberSetting("maxStackFrames", 24, 1, 64),
+    MaxStackCapturesPerSecond = numberSetting("maxStackCapturesPerSecond", 60, 1, 1000),
     MaxRemoteLogs = numberSetting("maxRemoteLogs", 500, 25, 5000),
     MaxClosureLogs = numberSetting("maxClosureLogs", 500, 25, 5000),
     MaxRenderedLogs = numberSetting("maxRenderedLogs", 100, 10, 500),
