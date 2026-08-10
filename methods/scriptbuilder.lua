@@ -7,6 +7,36 @@ local ALLOWED_METHODS = {
 	Invoke = true,
 }
 
+local LUA_KEYWORDS = {
+	["and"] = true,
+	["break"] = true,
+	["continue"] = true,
+	["do"] = true,
+	["else"] = true,
+	["elseif"] = true,
+	["end"] = true,
+	["export"] = true,
+	["false"] = true,
+	["for"] = true,
+	["function"] = true,
+	["if"] = true,
+	["in"] = true,
+	["local"] = true,
+	["nil"] = true,
+	["not"] = true,
+	["or"] = true,
+	["repeat"] = true,
+	["return"] = true,
+	["then"] = true,
+	["true"] = true,
+	["type"] = true,
+	["until"] = true,
+	["while"] = true,
+}
+
+local MAX_INLINE_TABLE_BYTES = 96
+local MAX_INLINE_CALL_BYTES = 140
+
 local DEFAULTS = {
 	MaxGeneratedTableEntries = 256,
 	MaxGeneratedTables = 512,
@@ -179,6 +209,9 @@ local function makeState()
 		ids = {},
 		order = {},
 		entries = {},
+		references = {},
+		graphTables = {},
+		rendering = {},
 		total = 0,
 		warnings = {},
 		warningKeys = {},
@@ -251,13 +284,21 @@ end
 local function collectTables(value, state, depth)
 	if type(value) ~= "table" or safeTypeof(value) ~= "table" then
 		return
-	elseif state.ids[value] then
+	end
+
+	state.references[value] = (state.references[value] or 0) + 1
+
+	if state.ids[value] then
 		return
 	elseif depth > state.maxDepth then
 		addWarning(state, "table-depth", "A nested table exceeded the configured depth limit and was omitted.")
 		return
 	elseif state.total >= state.maxTables then
-		addWarning(state, "table-count", "The captured table graph exceeded the configured table limit and was truncated.")
+		addWarning(
+			state,
+			"table-count",
+			"The captured table graph exceeded the configured table limit and was truncated."
+		)
 		return
 	end
 
@@ -268,6 +309,61 @@ local function collectTables(value, state, depth)
 	for _, entry in ipairs(readEntries(value, state)) do
 		collectTables(entry[1], state, depth + 1)
 		collectTables(entry[2], state, depth + 1)
+	end
+end
+
+local function markGraphTables(state)
+	local links = {}
+
+	for _, tableValue in ipairs(state.order) do
+		links[tableValue] = {}
+	end
+
+	for _, tableValue in ipairs(state.order) do
+		for _, entry in ipairs(readEntries(tableValue, state)) do
+			for index = 1, 2 do
+				local child = entry[index]
+
+				if type(child) == "table" and safeTypeof(child) == "table" and state.ids[child] then
+					links[tableValue][child] = true
+					links[child][tableValue] = true
+				end
+			end
+		end
+	end
+
+	local visited = {}
+
+	for _, tableValue in ipairs(state.order) do
+		if not visited[tableValue] then
+			local component = {}
+			local stack = { tableValue }
+			local requiresGraph = false
+			visited[tableValue] = true
+
+			while #stack > 0 do
+				local current = stack[#stack]
+				stack[#stack] = nil
+				component[#component + 1] = current
+
+				if (state.references[current] or 0) > 1 then
+					requiresGraph = true
+				end
+
+				for linked in pairs(links[current]) do
+					if not visited[linked] then
+						visited[linked] = true
+						stack[#stack + 1] = linked
+					end
+				end
+			end
+
+			if requiresGraph then
+				for _, member in ipairs(component) do
+					state.graphTables[member] = true
+				end
+			end
+		end
 	end
 end
 
@@ -435,7 +531,88 @@ local function makeSerializer(state)
 		return unsupported(valueType, isKey, ran and "unsupported Roblox datatype" or expression)
 	end
 
-	serialize = function(value, isKey)
+	local function isIdentifier(value)
+		return type(value) == "string" and value:match("^[%a_][%w_]*$") ~= nil and not LUA_KEYWORDS[value]
+	end
+
+	local function serializeTable(value, isKey, indentLevel)
+		local id = state.ids[value]
+
+		if not id then
+			return unsupported("table", isKey, "table graph limit reached")
+		elseif state.graphTables[value] then
+			return ("OH_Table_%d"):format(id), true
+		elseif state.rendering[value] then
+			return unsupported("table", isKey, "cyclic table analysis failed")
+		end
+
+		state.rendering[value] = true
+
+		local entries = readEntries(value, state)
+		local arrayValues = {}
+		local maximumIndex = 0
+		local isArray = true
+
+		for _, entry in ipairs(entries) do
+			local key = entry[1]
+
+			if type(key) ~= "number" or key < 1 or key ~= math.floor(key) then
+				isArray = false
+				break
+			end
+
+			maximumIndex = math.max(maximumIndex, key)
+			arrayValues[key] = entry[2]
+		end
+
+		if maximumIndex ~= #entries then
+			isArray = false
+		end
+
+		local fields = {}
+
+		if isArray then
+			for index = 1, maximumIndex do
+				local expression = serialize(arrayValues[index], false, indentLevel + 1)
+				fields[#fields + 1] = expression or "nil"
+			end
+		else
+			for _, entry in ipairs(entries) do
+				local key = entry[1]
+				local keyExpression, keySupported = serialize(key, true, indentLevel + 1)
+
+				if keySupported and keyExpression then
+					local valueExpression = serialize(entry[2], false, indentLevel + 1) or "nil"
+
+					if isIdentifier(key) then
+						fields[#fields + 1] = key .. " = " .. valueExpression
+					else
+						fields[#fields + 1] = "[" .. keyExpression .. "] = " .. valueExpression
+					end
+				end
+			end
+		end
+
+		state.rendering[value] = nil
+
+		if #fields == 0 then
+			return "{}", true
+		end
+
+		local compact = "{ " .. table.concat(fields, ", ") .. " }"
+
+		if #compact <= MAX_INLINE_TABLE_BYTES and not compact:find("\n", 1, true) then
+			return compact, true
+		end
+
+		local fieldIndent = string.rep("\t", indentLevel + 1)
+		local closingIndent = string.rep("\t", indentLevel)
+
+		return "{\n" .. fieldIndent .. table.concat(fields, ",\n" .. fieldIndent) .. ",\n" .. closingIndent .. "}", true
+	end
+
+	serialize = function(value, isKey, indentLevel)
+		indentLevel = indentLevel or 0
 		local rawType = type(value)
 		local valueType = safeTypeof(value)
 
@@ -444,13 +621,7 @@ local function makeSerializer(state)
 		elseif rawType == "table" and valueType ~= "table" then
 			return serializeRoblox(value, valueType, isKey)
 		elseif rawType == "table" then
-			local id = state.ids[value]
-
-			if id then
-				return ("OH_Table_%d"):format(id), true
-			end
-
-			return unsupported("table", isKey, "table graph limit reached")
+			return serializeTable(value, isKey, indentLevel)
 		elseif rawType == "string" then
 			if #value > state.maxStringBytes then
 				return unsupported("string", isKey, "string exceeds the configured byte limit")
@@ -485,17 +656,23 @@ local function appendLine(lines, state, line)
 	return true
 end
 
+local function hasGraphTables(state)
+	for _, tableValue in ipairs(state.order) do
+		if state.graphTables[tableValue] then
+			return true
+		end
+	end
+
+	return false
+end
+
 local function emitTables(lines, state, serialize)
-	if #state.order == 0 then
+	if not hasGraphTables(state) then
 		return true
 	end
 
-	if not appendLine(lines, state, "-- Table locals preserve cyclic and shared references.") then
-		return false
-	end
-
-	for id = 1, #state.order do
-		if not appendLine(lines, state, ("local OH_Table_%d = {}"):format(id)) then
+	for id, tableValue in ipairs(state.order) do
+		if state.graphTables[tableValue] and not appendLine(lines, state, ("local OH_Table_%d = {}"):format(id)) then
 			return false
 		end
 	end
@@ -505,23 +682,55 @@ local function emitTables(lines, state, serialize)
 	end
 
 	for id, tableValue in ipairs(state.order) do
-		for _, entry in ipairs(readEntries(tableValue, state)) do
-			local keyExpression, keySupported = serialize(entry[1], true)
-			local valueExpression = serialize(entry[2], false)
+		if state.graphTables[tableValue] then
+			for _, entry in ipairs(readEntries(tableValue, state)) do
+				local keyExpression, keySupported = serialize(entry[1], true)
 
-			if keySupported and keyExpression then
-				if not appendLine(
-					lines,
-					state,
-					("OH_Table_%d[%s] = %s"):format(id, keyExpression, valueExpression or "nil")
-				) then
-					return false
+				if keySupported and keyExpression then
+					local valueExpression = serialize(entry[2], false)
+
+					if
+						not appendLine(
+							lines,
+							state,
+							("OH_Table_%d[%s] = %s"):format(id, keyExpression, valueExpression or "nil")
+						)
+					then
+						return false
+					end
 				end
 			end
 		end
 	end
 
 	return appendLine(lines, state, "")
+end
+
+local function emitRemoteCall(lines, state, remotePath, method, args, argCount, serialize)
+	local expressions = {}
+
+	for index = 1, argCount do
+		expressions[index] = serialize(args[index], false, 1) or "nil"
+	end
+
+	local prefix = ("return %s:%s("):format(remotePath, method)
+	local compactCall = prefix .. table.concat(expressions, ", ") .. ")"
+
+	if argCount == 0 or (#compactCall <= MAX_INLINE_CALL_BYTES and not compactCall:find("\n", 1, true)) then
+		return appendLine(lines, state, compactCall)
+	elseif not appendLine(lines, state, prefix) then
+		return false
+	end
+
+	for index, expression in ipairs(expressions) do
+		local suffix = index < argCount and "," or ""
+
+		if not appendLine(lines, state, "\t" .. expression .. suffix) then
+			return false
+		end
+	end
+
+	return appendLine(lines, state, ")")
 end
 
 local function buildRemoteScript(remoteInstance, method, args, callInfo)
@@ -543,67 +752,69 @@ local function buildRemoteScript(remoteInstance, method, args, callInfo)
 		collectTables(args[index], state, 0)
 	end
 
+	markGraphTables(state)
+
 	local serialize = makeSerializer(state)
 	local body = {}
-	local prelude = {
-		"local OH_Unpack = table.unpack or unpack",
-		"local OH_Remote = " .. remotePath,
-		("local OH_Args = table.create and table.create(%d) or {}"):format(argCount),
-		("OH_Args.n = %d"):format(argCount),
-		"",
-	}
 
-	for _, line in ipairs(prelude) do
-		if not appendLine(body, state, line) then
-			return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
-		end
-	end
+	if hasGraphTables(state) then
+		local prelude = {
+			"local OH_Unpack = table.unpack or unpack",
+			"local OH_Remote = " .. remotePath,
+			("local OH_Args = table.create and table.create(%d) or {}"):format(argCount),
+			("OH_Args.n = %d"):format(argCount),
+			"",
+		}
 
-	if not emitTables(body, state, serialize) then
-		return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
-	end
-
-	for index = 1, argCount do
-		local expression = serialize(args[index], false)
-
-		if not appendLine(body, state, ("OH_Args[%d] = %s"):format(index, expression or "nil")) then
-			return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
-		end
-	end
-
-	if not appendLine(body, state, "")
-		or not appendLine(body, state, ("return OH_Remote:%s(OH_Unpack(OH_Args, 1, OH_Args.n))"):format(method))
-	then
-		return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
-	end
-
-	local header = {
-		"-- Generated by Hydroxide RemoteSpy",
-		"-- Fork: https://github.com/ProtonDev-sys/Hydroxide/tree/potassium-modernization-fork",
-		"-- Review before running: replaying a call can change game state.",
-		("-- Method: %s | Arguments: %d"):format(method, argCount),
-	}
-
-	if type(callInfo) == "table" then
-		if callInfo.timestamp ~= nil then
-			header[#header + 1] = "-- Captured at: " .. commentText(callInfo.timestamp)
-		end
-
-		if safeTypeof(callInfo.script) == "Instance" then
-			local callingPath = getInstanceExpression(callInfo.script)
-
-			if callingPath then
-				header[#header + 1] = "-- Calling script: " .. callingPath
+		for _, line in ipairs(prelude) do
+			if not appendLine(body, state, line) then
+				return nil,
+					("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
 			end
 		end
+
+		if not emitTables(body, state, serialize) then
+			return nil,
+				("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
+		end
+
+		for index = 1, argCount do
+			local expression = serialize(args[index], false)
+
+			if not appendLine(body, state, ("OH_Args[%d] = %s"):format(index, expression or "nil")) then
+				return nil,
+					("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
+			end
+		end
+
+		if
+			not appendLine(body, state, "")
+			or not appendLine(body, state, ("return OH_Remote:%s(OH_Unpack(OH_Args, 1, OH_Args.n))"):format(method))
+		then
+			return nil,
+				("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
+		end
+	elseif not emitRemoteCall(body, state, remotePath, method, args, argCount, serialize) then
+		return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
 	end
+
+	local note = "-- Generated by Hydroxide RemoteSpy"
+
+	if type(callInfo) == "table" and safeTypeof(callInfo.script) == "Instance" then
+		local callingPath = getInstanceExpression(callInfo.script)
+
+		if callingPath then
+			note = note .. " | Source: " .. callingPath
+		end
+	end
+
+	local header = { note }
 
 	for _, warning in ipairs(state.warnings) do
 		header[#header + 1] = "-- Warning: " .. warning
 	end
 
-	header[#header + 1] = ""
-	local generated = table.concat(header, "\n") .. table.concat(body, "\n")
+	local generated = table.concat(header, "\n") .. "\n" .. table.concat(body, "\n")
 
 	if #generated > state.maxOutputBytes then
 		return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
@@ -611,7 +822,6 @@ local function buildRemoteScript(remoteInstance, method, args, callInfo)
 
 	return generated
 end
-
 
 methods.buildRemoteScript = buildRemoteScript
 methods.getReplayInstancePath = getInstanceExpression

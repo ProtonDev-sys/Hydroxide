@@ -16,6 +16,7 @@ local Dropdown = import("ui/controls/Dropdown")
 local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local TextViewer = import("ui/controls/TextViewer")
+local InlineViewer = import("ui/controls/InlineViewer")
 local ActionPanel = import("ui/controls/ActionPanel")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
 local TabSelector = import("ui/controls/TabSelector")
@@ -108,6 +109,7 @@ local removeContext = ContextMenuButton.new("rbxassetid://4702831188", "Remove L
 local argumentsContext = ContextMenuButton.new(icons.arguments, "View Arguments")
 local returnsContext = ContextMenuButton.new(icons.results, "View Returns")
 local callStackContext = ContextMenuButton.new(icons.stack, "View Call Stack")
+local functionStackContext = ContextMenuButton.new(icons.spy, "View Function Stack")
 local inspectFunctionContext = ContextMenuButton.new(icons.spy, "Inspect Calling Function")
 local inspectTargetContext = ContextMenuButton.new(icons.spy, "Inspect Target Function")
 local inspectScriptContext = ContextMenuButton.new(icons.source, "Inspect Calling Script")
@@ -138,6 +140,7 @@ local hookLogsMenu = ContextMenu.new({
 	argumentsContext,
 	returnsContext,
 	callStackContext,
+	functionStackContext,
 	inspectFunctionContext,
 	inspectTargetContext,
 	inspectScriptContext,
@@ -151,6 +154,7 @@ local queuedLogRenders = {}
 local queuedCountUpdates = {}
 local renderedCallLog
 local renderedCallButtons = {}
+local callDetails
 
 local function getMaxRenderedLogs()
 	local settings = oh.Settings or {}
@@ -170,6 +174,14 @@ end
 local function clearSelectedCall(button)
 	if button and selected.callPodButton ~= button then
 		return
+	elseif button then
+		selected.callPodButton = nil
+
+		if updateCallInspector then
+			updateCallInspector()
+		end
+
+		return
 	end
 
 	selected.args = nil
@@ -184,7 +196,7 @@ local function clearSelectedCall(button)
 end
 
 local function selectedCallAlive()
-	return selected.callPodButton and selected.callPodButton.Instance and selected.callPodButton.Instance.Parent
+	return selected.callInfo ~= nil
 end
 
 local function guardSelectedCall(title)
@@ -193,11 +205,18 @@ local function guardSelectedCall(title)
 	end
 
 	clearSelectedCall()
-	TextViewer.Show(
-		title or "Call No Longer Visible",
-		"The selected call row is no longer in the rendered newest-call window."
-	)
+	if callDetails then
+		callDetails:Show(title or "No Call Selected", "Select a captured call to inspect.")
+	end
 	return false
+end
+
+local function showDetails(title, text, options)
+	if callDetails then
+		callDetails:Show(title, text, options)
+	else
+		TextViewer.Show(title, text, options)
+	end
 end
 
 local function resetRenderedCalls()
@@ -337,6 +356,27 @@ local function describeFunction(func)
 	lines[#lines + 1] = "Current Line: " .. tostring(info and info.currentline or "unknown")
 	lines[#lines + 1] = "Upvalues: " .. tostring(info and info.nups or "unknown")
 
+	if type(getConstants) == "function" then
+		local constantsRan, constants = pcall(getConstants, func)
+		lines[#lines + 1] = "Constants: "
+			.. tostring(constantsRan and type(constants) == "table" and #constants or "unavailable")
+	end
+
+	if type(getProtos) == "function" then
+		local protosRan, protos = pcall(getProtos, func)
+		lines[#lines + 1] = "Protos: " .. tostring(protosRan and type(protos) == "table" and #protos or "unavailable")
+	end
+
+	if type(getUpvalues) == "function" then
+		local upvaluesRan, upvalues = pcall(getUpvalues, func)
+		if upvaluesRan and type(upvalues) == "table" then
+			lines[#lines + 1] = "Captured Upvalue Values: " .. tostring(#upvalues)
+			for index = 1, math.min(#upvalues, 12) do
+				lines[#lines + 1] = ("  [%02d] %s"):format(index, argumentSummary(upvalues[index]))
+			end
+		end
+	end
+
 	if type(decompile) == "function" then
 		local decompiled, source = pcall(decompile, func)
 
@@ -351,6 +391,43 @@ local function describeFunction(func)
 	else
 		lines[#lines + 1] = ""
 		lines[#lines + 1] = "Decompiler is not available in this executor."
+	end
+
+	return table.concat(lines, "\n")
+end
+
+local function describeStackFunctions(call)
+	if not call or type(call.stack) ~= "table" or #call.stack == 0 then
+		return "No function stack was captured for this call."
+	end
+
+	local lines = {
+		"CLOSURE FUNCTION STACK",
+		("Frames: %d"):format(#call.stack),
+		"",
+	}
+
+	for index, frame in ipairs(call.stack) do
+		if type(frame) == "table" then
+			local func = frame.func or frame.Function
+			local name = frame.name or frame.Name or "anonymous"
+			local source = cleanSource(frame.short_src or frame.shortSource or frame.source or frame.Source)
+			local line = tonumber(frame.currentline or frame.line or frame.Line)
+			lines[#lines + 1] = ("-- %02d  %s  %s:%s"):format(
+				index,
+				tostring(name),
+				source,
+				line and tostring(math.floor(line)) or "?"
+			)
+
+			if type(func) == "function" then
+				lines[#lines + 1] = describeFunction(func)
+			else
+				lines[#lines + 1] = "No function object was exposed for this frame."
+			end
+
+			lines[#lines + 1] = ""
+		end
 	end
 
 	return table.concat(lines, "\n")
@@ -391,7 +468,10 @@ local function describeCallStack(call)
 	end
 
 	local caller = type(call.caller) == "table" and call.caller or {}
-	local state = call.blocked and "Blocked" or (call.error and "Forward error") or (call.forwarded and "Forwarded") or "Captured"
+	local state = call.blocked and "Blocked"
+		or (call.error and "Forward error")
+		or (call.forwarded and "Forwarded")
+		or "Captured"
 	local source = cleanSource(caller.shortSource or caller.source)
 	local line = tonumber(caller.line)
 	local lines = {
@@ -401,7 +481,9 @@ local function describeCallStack(call)
 		),
 		("State: %s"):format(state),
 		("Captured: %s"):format(formatTimestamp(call.timestamp)),
-		("Duration: %s"):format(type(call.durationMs) == "number" and ("%.3f ms"):format(call.durationMs) or "not available"),
+		("Duration: %s"):format(
+			type(call.durationMs) == "number" and ("%.3f ms"):format(call.durationMs) or "not available"
+		),
 		("Calling script: %s"):format(safeInstancePath(call.script) or "unknown"),
 		("Caller: %s"):format(tostring(caller.name or "anonymous")),
 		("Location: %s:%s"):format(source, line and tostring(math.floor(line)) or "?"),
@@ -449,6 +531,7 @@ local function describeCallStack(call)
 	end
 
 	lines[#lines + 1] = ("External VM call chain (%d frames; native and Hydroxide frames removed):"):format(#stack)
+	lines[#lines + 1] = "First frame is closest to the closure call; arrows walk outward through the caller chain."
 
 	for index, frame in ipairs(stack) do
 		if type(frame) == "table" then
@@ -457,12 +540,21 @@ local function describeCallStack(call)
 			local line = tonumber(frame.currentline or frame.line or frame.Line)
 			local scriptInstance = frame.script or frame.Script
 			local scriptPath = safeInstancePath(scriptInstance)
-			lines[#lines + 1] = ("%02d  %s"):format(index, tostring(name))
+			local func = frame.func or frame.Function or frame.functionValue
+			lines[#lines + 1] = ("%02d  %s%s"):format(
+				index,
+				tostring(name),
+				func and ("  [" .. tostring(func) .. "]") or ""
+			)
 			lines[#lines + 1] = ("    %s:%s%s"):format(
 				source,
 				line and tostring(math.floor(line)) or "?",
 				scriptPath and ("  [" .. scriptPath .. "]") or ""
 			)
+
+			if frame.what then
+				lines[#lines + 1] = "    kind: " .. tostring(frame.what)
+			end
 
 			if index < #stack then
 				lines[#lines + 1] = "    ->"
@@ -478,7 +570,7 @@ end
 local callInspector
 
 local function hasSelectedCall()
-	return selected.callPodButton and selected.callPodButton.Instance and selected.callPodButton.Instance.Parent
+	return selected.callInfo ~= nil
 end
 
 updateCallInspector = function()
@@ -491,6 +583,7 @@ updateCallInspector = function()
 		callInspector:SetEnabled("Arguments", false)
 		callInspector:SetEnabled("Returns", false)
 		callInspector:SetEnabled("CallStack", false)
+		callInspector:SetEnabled("FunctionStack", false)
 		callInspector:SetEnabled("Function", false)
 		callInspector:SetEnabled("Target", false)
 		callInspector:SetEnabled("ScriptSource", false)
@@ -513,6 +606,7 @@ updateCallInspector = function()
 	callInspector:SetEnabled("Arguments", true)
 	callInspector:SetEnabled("Returns", call.completed == true)
 	callInspector:SetEnabled("CallStack", true)
+	callInspector:SetEnabled("FunctionStack", type(call.stack) == "table" and #call.stack > 0)
 	callInspector:SetEnabled("Function", type(selected.func) == "function")
 	callInspector:SetEnabled("Target", selected.hookLog ~= nil)
 	callInspector:SetEnabled("ScriptSource", typeof(selected.callingScript) == "Instance")
@@ -1304,7 +1398,7 @@ end)
 
 local function showArguments()
 	if guardSelectedCall("Closure Arguments") then
-		TextViewer.Show("Closure Arguments", describePackedValues("CAPTURED ARGUMENTS", selected.args or {}))
+		showDetails("Closure Arguments", describePackedValues("CAPTURED ARGUMENTS", selected.args or {}))
 	end
 end
 
@@ -1322,7 +1416,7 @@ local function showReturns()
 		text = "The target closure raised an error:\n" .. tostring(call.error) .. "\n\n" .. text
 	end
 
-	TextViewer.Show("Closure Returns", text)
+	showDetails("Closure Returns", text)
 end
 
 local function showCallStack()
@@ -1330,7 +1424,15 @@ local function showCallStack()
 		return
 	end
 
-	TextViewer.Show("Closure Call Stack", describeCallStack(selected.callInfo))
+	showDetails("Closure Call Stack", describeCallStack(selected.callInfo))
+end
+
+local function showFunctionStack()
+	if not guardSelectedCall("Closure Function Stack") then
+		return
+	end
+
+	showDetails("Closure Function Stack", describeStackFunctions(selected.callInfo))
 end
 
 local function inspectCallingFunction()
@@ -1338,7 +1440,7 @@ local function inspectCallingFunction()
 		return
 	end
 
-	TextViewer.Show("Calling Function", describeFunction(selected.func))
+	showDetails("Calling Function", describeFunction(selected.func))
 end
 
 local function inspectTargetFunction()
@@ -1347,7 +1449,7 @@ local function inspectTargetFunction()
 	end
 
 	local func = selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Target
-	TextViewer.Show("Target Function", describeFunction(func))
+	showDetails("Target Function", describeFunction(func))
 end
 
 local function inspectCallingScript()
@@ -1355,7 +1457,7 @@ local function inspectCallingScript()
 		return
 	end
 
-	TextViewer.Show("Calling Script", describeScript(selected.callingScript))
+	showDetails("Calling Script", describeScript(selected.callingScript))
 end
 
 local function copyCallingScriptPath()
@@ -1364,14 +1466,14 @@ local function copyCallingScriptPath()
 	end
 
 	if typeof(selected.callingScript) ~= "Instance" then
-		return TextViewer.Show("Calling Script", "No calling script was captured for this call.")
+		return showDetails("Calling Script", "No calling script was captured for this call.")
 	end
 
 	local path = safeInstancePath(selected.callingScript)
 	local copied, copyError = path and pcall(setClipboard, path)
 
 	if not copied then
-		TextViewer.Show("Copy Failed", tostring(copyError or "The calling script path is unavailable."))
+		showDetails("Copy Failed", tostring(copyError or "The calling script path is unavailable."))
 	else
 		oh.setStatus("Calling script path copied")
 	end
@@ -1408,18 +1510,22 @@ end
 argumentsContext:SetCallback(showArguments)
 returnsContext:SetCallback(showReturns)
 callStackContext:SetCallback(showCallStack)
+functionStackContext:SetCallback(showFunctionStack)
 inspectFunctionContext:SetCallback(inspectCallingFunction)
 inspectTargetContext:SetCallback(inspectTargetFunction)
 inspectScriptContext:SetCallback(inspectCallingScript)
 callingScriptContext:SetCallback(copyCallingScriptPath)
 spyClosureContext:SetCallback(spyCallingFunction)
 
+callDetails = InlineViewer.Install(ClosureLogs, { HeightScale = 0.42 })
+
 callInspector = ActionPanel.Install(LogsButtons, ClosureLogs.Results, {
-	Columns = 5,
+	Columns = 4,
 	Actions = {
 		{ Name = "Arguments", Label = "Arguments", Icon = icons.arguments, Callback = showArguments },
 		{ Name = "Returns", Label = "Returns", Icon = icons.results, Callback = showReturns },
 		{ Name = "CallStack", Label = "Stack", Icon = icons.stack, Callback = showCallStack },
+		{ Name = "FunctionStack", Label = "Fn Stack", Icon = icons.spy, Callback = showFunctionStack },
 		{ Name = "Function", Label = "Caller Fn", Icon = icons.spy, Callback = inspectCallingFunction },
 		{ Name = "Target", Label = "Target Fn", Icon = icons.spy, Callback = inspectTargetFunction },
 		{ Name = "ScriptSource", Label = "Script", Icon = icons.source, Callback = inspectCallingScript },

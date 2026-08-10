@@ -18,6 +18,7 @@ if prefetch then
 		"ui/controls/List",
 		"ui/controls/ContextMenu",
 		"ui/controls/TextViewer",
+		"ui/controls/InlineViewer",
 		"ui/controls/ActionPanel",
 		"ui/modules/RemoteSpy",
 		"ui/modules/ClosureSpy",
@@ -37,7 +38,7 @@ if prefetch then
 		"objects/ModuleScript",
 		"objects/Upvalue",
 		"objects/Constant",
-		"methods/scriptbuilder"
+		"methods/scriptbuilder",
 	})
 
 	if not prefetched and warn then
@@ -49,10 +50,8 @@ import("ui/controls/TabSelector")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local Base = Interface.Base
 local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
-local originalWidth = math.max(650, Base.AbsoluteSize.X, Base.Size.X.Offset)
-local originalHeight = math.max(350, Base.AbsoluteSize.Y, Base.Size.Y.Offset)
-local baseWidth = math.floor(math.max(originalWidth, math.min(980, viewport.X - 40)))
-local baseHeight = math.floor(math.max(originalHeight, math.min(620, viewport.Y - 80)))
+local baseWidth = math.floor(math.max(480, math.min(1280, viewport.X - 32)))
+local baseHeight = math.floor(math.max(350, math.min(760, viewport.Y - 56)))
 
 Base.Size = UDim2.new(0, baseWidth, 0, baseHeight)
 
@@ -74,13 +73,14 @@ end, function(err)
 	err = tostring(err)
 	local message
 	if err:find("valid member") then
-		message = "The UI asset changed. Rejoin and restart Hydroxide. If this repeats, report it at https://github.com/ProtonDev-sys/Hydroxide/issues.\n\n" .. err
+		message = "The UI asset changed. Rejoin and restart Hydroxide. If this repeats, report it at https://github.com/ProtonDev-sys/Hydroxide/issues.\n\n"
+			.. err
 	else
 		message = "Report this error at https://github.com/ProtonDev-sys/Hydroxide/issues:\n\n" .. err
 	end
 
 	MessageBox.Show("An error has occurred", message, MessageType.OK, function()
-		Interface:Destroy() 
+		Interface:Destroy()
 	end)
 end)
 
@@ -88,7 +88,7 @@ local constants = {
 	opened = UDim2.new(0.5, -baseWidth / 2, 0.5, -baseHeight / 2),
 	closed = UDim2.new(0.5, -baseWidth / 2, 0, -(baseHeight + 50)),
 	reveal = UDim2.new(0.5, -15, 0, 20),
-	conceal = UDim2.new(0.5, -15, 0, -75)
+	conceal = UDim2.new(0.5, -15, 0, -75),
 }
 
 local Open = Interface.Open
@@ -99,11 +99,11 @@ local Collapse = Drag.Collapse
 Base.Position = constants.closed
 
 function oh.setStatus(text)
-	Status.Text = '• Status: ' .. text
+	Status.Text = "• Status: " .. text
 end
 
 function oh.getStatus()
-	return Status.Text:gsub('• Status: ', '')
+	return Status.Text:gsub("• Status: ", "")
 end
 
 local dragging
@@ -112,7 +112,7 @@ local startPos
 
 Drag.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		local dragEnded 
+		local dragEnded
 
 		dragging = true
 		dragStart = input.Position
@@ -130,7 +130,8 @@ end)
 oh.Events.Drag = UserInput.InputChanged:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseMovement and dragging then
 		local delta = input.Position - dragStart
-		Base.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		Base.Position =
+			UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 	end
 end)
 
