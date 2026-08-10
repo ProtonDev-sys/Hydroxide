@@ -6,7 +6,6 @@ if not hasMethods(Methods.RequiredMethods) then
 end
 
 local List, ListButton = import("ui/controls/List")
-local MessageBox, MessageType = import("ui/controls/MessageBox")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
 local TextViewer = import("ui/controls/TextViewer")
 
@@ -21,16 +20,22 @@ local Results = Page.Results.Clip.Content
 local moduleList = List.new(Results)
 local moduleLogs = {}
 local selectedLog
+local sourceGeneration = 0
 
 local pathContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Module Path")
 local sourceContext = ContextMenuButton.new("rbxassetid://4800244808", "View Module Source")
 moduleList:BindContextMenu(ContextMenu.new({ pathContext, sourceContext }))
 
 pathContext:SetCallback(function()
-    local selectedInstance = selectedLog.ModuleScript.Instance
+	local selectedInstance = selectedLog and selectedLog.ModuleScript.Instance
 
-    setClipboard(getInstancePath(selectedInstance))
-    MessageBox.Show("Success", ("%s's path was copied to your clipboard."):format(selectedInstance.Name), MessageType.OK)
+	if not selectedInstance then
+		return
+	end
+
+	local pathRan, path = pcall(getInstancePath, selectedInstance)
+	local copied = pathRan and path and pcall(setClipboard, path)
+	oh.setStatus(copied and "Module path copied" or "Module path unavailable")
 end)
 
 local function runPrivileged(callback)
@@ -42,18 +47,31 @@ local function runPrivileged(callback)
 end
 
 local function showSource(title, source, errorMessage)
-    if source then
-        TextViewer.Show(title, source)
-    else
-        MessageBox.Show("Cannot view source", errorMessage or "Source is unavailable", MessageType.OK)
-    end
+	TextViewer.Show(title, source or ("Source unavailable:\n" .. tostring(errorMessage or "unknown error")))
 end
 
 local function viewModuleSource(moduleScript)
-    runPrivileged(function()
-        local source, sourceError = moduleScript:Decompile()
-        showSource(moduleScript.Instance.Name .. " Source", source, sourceError)
-    end)
+	sourceGeneration = sourceGeneration + 1
+	local generation = sourceGeneration
+	local title = moduleScript.Instance.Name .. " Source"
+	showSource(title, "Decompiling module ...")
+
+	task.spawn(function()
+		local source, sourceError
+		local inspected, inspectError = pcall(function()
+			runPrivileged(function()
+				source, sourceError = moduleScript:Decompile()
+			end)
+		end)
+
+		if not inspected then
+			sourceError = "Module inspection failed: " .. tostring(inspectError)
+		end
+
+		if generation == sourceGeneration then
+			showSource(title, source, sourceError)
+		end
+	end)
 end
 
 -- Log Object
@@ -71,9 +89,10 @@ function Log.new(moduleScript)
     button.Protos.Text = "-"
     button.Constants.Text = "-"
 
-    listButton:SetCallback(function()
-        viewModuleSource(moduleScript)
-    end)
+	listButton:SetCallback(function()
+		selectedLog = log
+		viewModuleSource(moduleScript)
+	end)
 
     listButton:SetRightCallback(function()
         selectedLog = log
@@ -97,8 +116,10 @@ end)
 -- UI Functionality
 
 local function addModules(query)
-    moduleList:Clear()
-    moduleLogs = {}
+	sourceGeneration = sourceGeneration + 1
+	moduleList:Clear()
+	moduleLogs = {}
+	selectedLog = nil
     moduleList:BeginBatch()
 
     for _moduleInstance, moduleScript in pairs(Methods.Scan(query)) do

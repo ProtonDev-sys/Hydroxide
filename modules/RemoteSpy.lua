@@ -699,29 +699,33 @@ local function installDirectHook(target, targetMethod)
     diagnostics.DirectHookAttempts = diagnostics.DirectHookAttempts + 1
     local lastFailure
 
-    -- Potassium's documented pass-through for hooked C functions is the root
-    -- callback supplied to an OTH hook. Prefer that path for Instance methods;
-    -- the namecall hook still captures the original-thread stack for ordinary
-    -- colon calls, while the nested OTH hook is deduplicated by thread context.
+	-- Potassium documents oth.get_root_callback() as the authoritative
+	-- pass-through inside hook threads. Some builds also return the original
+	-- callback from oth.hook, which is retained strictly as a compatibility
+	-- fallback so a root-callback lookup failure does not swallow the call.
     if othHook and othGetRootCallback and othUnhook then
         diagnostics.OthHookAttempts = diagnostics.OthHookAttempts + 1
-        local callback = createDirectHookCallback(targetMethod, true)
-        local othCallback = registerInternal(function(...)
-            local rootRan, original = pcall(othGetRootCallback)
+		local callback = createDirectHookCallback(targetMethod, true)
+		local installedOriginal
+		local othCallback = registerInternal(function(...)
+			local rootRan, rootCallback = pcall(othGetRootCallback)
+			local original = rootRan and type(rootCallback) == "function" and rootCallback or installedOriginal
 
-            if not rootRan or type(original) ~= "function" then
-                recordCaptureError("oth-root-callback", original)
-                error("RemoteSpy could not resolve the OTH root callback", 0)
-            end
+			if type(original) ~= "function" then
+				recordCaptureError("oth-root-callback", rootCallback)
+				error("RemoteSpy could not resolve the OTH root callback", 0)
+			end
 
             return callback(original, ...)
         end)
         local ran, result = pcall(othHook, target, othCallback)
 
         if ran and result ~= false then
+            installedOriginal = type(result) == "function" and result or nil
             oh.Hooks[#oh.Hooks + 1] = {
                 Kind = "oth",
                 Target = target,
+                Original = installedOriginal,
                 Active = true
             }
             diagnostics.DirectHooksInstalled = diagnostics.DirectHooksInstalled + 1

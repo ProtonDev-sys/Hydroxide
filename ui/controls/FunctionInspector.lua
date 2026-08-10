@@ -1,8 +1,13 @@
 local FunctionInspector = {}
+local sourceCache = setmetatable({}, { __mode = "k" })
 
 local function safeTypeof(value)
-	local ran, valueType = pcall(typeof, value)
-	return ran and valueType or type(value)
+	if type(typeof) == "function" then
+		local ran, valueType = pcall(typeof, value)
+		return ran and valueType or type(value)
+	end
+
+	return type(value)
 end
 
 local function safeTostring(value)
@@ -49,7 +54,7 @@ local function sortedEntries(values, limit)
 
 	local total = 0
 
-	for key, value in pairs(values) do
+	for key, value in next, values do
 		total = total + 1
 
 		if #entries < limit then
@@ -95,6 +100,51 @@ local function functionEnvironment(func)
 	return nil, ran and "environment not returned" or safeTostring(environment)
 end
 
+local function callBoolean(method, func)
+	if type(method) ~= "function" then
+		return nil
+	end
+
+	local ran, result = pcall(method, func)
+	return ran and type(result) == "boolean" and result or nil
+end
+
+local function functionSource(func, options)
+	local decompiler = options.Decompile or decompile
+	local cacheAllowed = options.CacheSource ~= false and options.Decompile == nil
+
+	if type(decompiler) ~= "function" then
+		return nil, "unavailable"
+	end
+
+	if cacheAllowed then
+		local cached = sourceCache[func]
+
+		if cached then
+			return cached.Source, cached.Error
+		end
+	end
+
+	local ran, source, sourceError = pcall(decompiler, func)
+
+	if not ran then
+		sourceError = safeTostring(source)
+		source = nil
+	elseif type(source) ~= "string" or source == "" then
+		sourceError = sourceError or "no source returned"
+		source = nil
+	end
+
+	if cacheAllowed then
+		sourceCache[func] = {
+			Source = source,
+			Error = sourceError,
+		}
+	end
+
+	return source, sourceError
+end
+
 local function describeFunctionInto(lines, state, func, options)
 	local summarize = options.Summarize or defaultSummary
 	local getPath = options.GetPath
@@ -110,6 +160,25 @@ local function describeFunctionInto(lines, state, func, options)
 	appendBounded(lines, state, "Defined: " .. tostring(info and info.linedefined or "unknown"))
 	appendBounded(lines, state, "Current line: " .. tostring(info and info.currentline or "unknown"))
 	appendBounded(lines, state, "Declared upvalues: " .. tostring(info and info.nups or "unknown"))
+
+	local luaClosure = callBoolean(isLClosure, func)
+	local executorClosure = callBoolean(isXClosure, func)
+
+	if luaClosure ~= nil then
+		appendBounded(lines, state, "Closure type: " .. (luaClosure and "Lua" or "C"))
+	end
+
+	if executorClosure ~= nil then
+		appendBounded(lines, state, "Origin: " .. (executorClosure and "executor" or "game"))
+	end
+
+	if type(getFunctionHash) == "function" then
+		local hashRan, hash = pcall(getFunctionHash, func)
+
+		if hashRan and hash ~= nil then
+			appendBounded(lines, state, "Function hash: " .. safeTostring(hash))
+		end
+	end
 
 	local environment, environmentError = functionEnvironment(func)
 	local environmentScript = environment and rawget(environment, "script")
@@ -177,22 +246,18 @@ local function describeFunctionInto(lines, state, func, options)
 		end
 	end
 
-	if type(decompile) == "function" then
-		local decompiled, source = pcall(decompile, func)
+	local source, sourceError = functionSource(func, options)
 
-		if decompiled and type(source) == "string" and source ~= "" then
-			if #source > sourceLimit then
-				source = source:sub(1, sourceLimit) .. "\n-- ... source truncated ..."
-			end
-
-			appendBounded(lines, state, "")
-			appendBounded(lines, state, "-- Decompiled source")
-			appendBounded(lines, state, source)
-		else
-			appendBounded(lines, state, "Decompiler: " .. (decompiled and "no source returned" or safeTostring(source)))
+	if source then
+		if #source > sourceLimit then
+			source = source:sub(1, sourceLimit) .. "\n-- ... source truncated ..."
 		end
+
+		appendBounded(lines, state, "")
+		appendBounded(lines, state, "-- Decompiled source")
+		appendBounded(lines, state, source)
 	else
-		appendBounded(lines, state, "Decompiler: unavailable")
+		appendBounded(lines, state, "Decompiler: " .. tostring(sourceError or "unavailable"))
 	end
 end
 
@@ -228,6 +293,34 @@ function FunctionInspector.DescribeStack(stack, options)
 	}
 
 	appendBounded(lines, state, ("FUNCTION CALL CHAIN (%d frames)"):format(#stack))
+	appendBounded(lines, state, "Order: closest to the intercepted call -> outermost caller")
+	appendBounded(lines, state, "")
+
+	for index, frame in ipairs(stack) do
+		frame = type(frame) == "table" and frame or {}
+		local name = frame.name or frame.Name or "anonymous"
+		local source = frame.shortSource or frame.short_src or frame.source or frame.Source or "unknown"
+		local line = tonumber(frame.line or frame.currentline or frame.Line)
+		local func = frame.func or frame.Function
+		appendBounded(
+			lines,
+			state,
+			("%02d  %s  %s:%s%s"):format(
+				index,
+				tostring(name),
+				tostring(source):gsub("^[@=]", ""),
+				line and math.floor(line) or "?",
+				type(func) == "function" and ("  [" .. safeTostring(func) .. "]") or ""
+			)
+		)
+
+		if index < #stack then
+			appendBounded(lines, state, "    ->")
+		end
+	end
+
+	appendBounded(lines, state, "")
+	appendBounded(lines, state, "DETAILED FRAME INSPECTION")
 	appendBounded(lines, state, "")
 
 	for index, frame in ipairs(stack) do

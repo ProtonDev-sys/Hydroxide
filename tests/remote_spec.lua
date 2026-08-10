@@ -240,8 +240,14 @@ do
 
             return unpackValues(results, 2, results.n)
         end
+        return target
     end
+    local failRootLookup = false
     _G.othGetRootCallback = function()
+        if failRootLookup then
+            error("simulated root lookup failure")
+        end
+
         return currentRootCallback
     end
     _G.othGetOriginalThread = coroutine.running
@@ -301,6 +307,14 @@ do
     assertEqual(#eventModel.Logs[1].stack, 2, "native and internal RemoteSpy stack frames filtered")
     assertEqual(eventModel.Logs[1].stack[2].name, "C_LootDropHandler", "anonymous parent frame gets a useful name")
     assertEqual(RemoteSpy.Diagnostics.CallsDeduplicated, 1, "direct/namecall pair deduplicated")
+
+    local fallbackEvent = newInstance("RemoteEvent")
+    local callsBeforeRootFallback = originalCalls
+    failRootLookup = true
+    local fallbackResult = directWrappers[classMethods.RemoteEvent.FireServer](fallbackEvent, "root-fallback")
+    failRootLookup = false
+    assertEqual(fallbackResult, "remote-event-result", "OTH returned-original fallback preserves the call result")
+    assertEqual(originalCalls, callsBeforeRootFallback + 1, "OTH root lookup failure still reaches the original")
 
     local executorEvent = newInstance("RemoteEvent")
     _G.checkCaller = function()

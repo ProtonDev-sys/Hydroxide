@@ -65,6 +65,8 @@ end
 
 local function configureButton(button, toolbar, action, width, height)
 	button.Name = action.Name
+	button.AnchorPoint = Vector2.new(0, 0)
+	button.Position = UDim2.new()
 	button.Size = UDim2.new(0, action.Width or width, 0, height)
 	button.Visible = true
 	button.ClipsDescendants = true

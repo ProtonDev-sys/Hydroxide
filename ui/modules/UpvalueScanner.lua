@@ -18,6 +18,7 @@ local List, ListButton = import("ui/controls/List")
 local TabSelector = import("ui/controls/TabSelector")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local TextViewer = import("ui/controls/TextViewer")
+local FunctionInspector = import("ui/controls/FunctionInspector")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
 
 local Base = import("rbxassetid://11389137937").Base
@@ -45,8 +46,10 @@ local selectedLog
 local selectedUpvalue
 local selectedUpvalueLog
 local selectedElement
+local inspectGeneration = 0
 
 local spyClosureContext = ContextMenuButton.new("rbxassetid://4666593447", "Spy Closure")
+local inspectFunctionContext = ContextMenuButton.new("rbxassetid://4800244808", "Inspect Function")
 local viewUpvaluesContext = ContextMenuButton.new("rbxassetid://5179169654", "View All Upvalues")
 local changeUpvalueContext = ContextMenuButton.new("rbxassetid://5458573463", "Change Upvalue")
 local changeTableContext = ContextMenuButton.new("rbxassetid://5458573463", "Change Upvalue")
@@ -57,7 +60,7 @@ local tableScriptContext = ContextMenuButton.new("rbxassetid://4800244808", "Gen
 local elementScriptContext = ContextMenuButton.new("rbxassetid://4800244808", "Generate Script")
 local getScriptContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Script Path")
 
-local closureContextMenu = ContextMenu.new({ spyClosureContext, viewUpvaluesContext, getScriptContext })
+local closureContextMenu = ContextMenu.new({ inspectFunctionContext, spyClosureContext, viewUpvaluesContext, getScriptContext })
 local tableContextMenu = ContextMenu.new({ changeTableContext, viewElementsContext, tableScriptContext })
 local upvalueContextMenu = ContextMenu.new({ changeUpvalueContext, upvalueScriptContext })
 local elementContextMenu = ContextMenu.new({ changeElementContext, elementScriptContext })
@@ -87,6 +90,43 @@ local function typeMismatchMessage()
     MessageBox.Show("Error", 
         "Value does not match selected type",
         MessageType.OK)
+end
+
+local function inspectSelectedFunction()
+    if not selectedLog then
+        return
+    end
+
+    inspectGeneration = inspectGeneration + 1
+    local generation = inspectGeneration
+    local log = selectedLog
+    TextViewer.Show("Function Inspector", "Inspecting function metadata, upvalues, constants, protos, environment, and source ...")
+
+    task.spawn(function()
+        local text
+        local inspected, inspectError = pcall(function()
+            local function inspect()
+                text = FunctionInspector.DescribeFunction(log.Closure.Data, {
+                    GetPath = function(instance)
+                        return getInstancePath(instance)
+                    end
+                })
+            end
+
+            if type(withExecutorIdentity) == "function" then
+                withExecutorIdentity(inspect)
+            else
+                inspect()
+            end
+        end)
+
+        if generation == inspectGeneration and selectedLog == log then
+            TextViewer.Show(
+                "Function Inspector",
+                inspected and (text or "No function information was returned.") or ("Function inspection failed:\n" .. tostring(inspectError))
+            )
+        end
+    end)
 end
 
 local function addElement(upvalueLog, upvalue, index, value, temporary)
@@ -256,6 +296,11 @@ function Log.new(closure)
     
     listButton:SetRightCallback(function()
         selectedLog = log
+    end)
+
+    listButton:SetCallback(function()
+        selectedLog = log
+        inspectSelectedFunction()
     end)
     
     currentUpvalues[closure.Data] = log
@@ -571,6 +616,10 @@ end)
 
 local SpyHook = ClosureSpy.Hook
 spyClosureContext:SetCallback(function()
+    if not selectedLog then
+        return
+    end
+
     local closure = selectedLog.Closure
 
     if TabSelector.SelectTab("ClosureSpy") then
@@ -583,6 +632,8 @@ spyClosureContext:SetCallback(function()
         end
     end
 end)
+
+inspectFunctionContext:SetCallback(inspectSelectedFunction)
 
 viewUpvaluesContext:SetCallback(function()
     if selectedLog then

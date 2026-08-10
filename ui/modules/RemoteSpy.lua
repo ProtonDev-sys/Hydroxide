@@ -28,7 +28,6 @@ local Dropdown = import("ui/controls/Dropdown")
 local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local TextViewer = import("ui/controls/TextViewer")
-local InlineViewer = import("ui/controls/InlineViewer")
 local FunctionInspector = import("ui/controls/FunctionInspector")
 local ActionPanel = import("ui/controls/ActionPanel")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
@@ -143,6 +142,7 @@ local callingScriptContext = ContextMenuButton.new(icons.copy, "Copy Calling Scr
 local spyClosureContext = ContextMenuButton.new(icons.spy, "Spy Calling Function")
 local repeatCallContext = ContextMenuButton.new(icons.repeatCall, "Replay Call")
 local viewAsHexContext = ContextMenuButton.new(icons.hex, "Toggle String Hex View")
+local diagnosticsContext = ContextMenuButton.new(icons.status, "View Capture Diagnostics")
 
 local removeConditionContext = ContextMenuButton.new("rbxassetid://4702831188", "Remove Condition")
 
@@ -180,6 +180,7 @@ local remoteLogsMenu = ContextMenu.new({
 	spyClosureContext,
 	repeatCallContext,
 	viewAsHexContext,
+	diagnosticsContext,
 })
 local remoteConditionMenu = ContextMenu.new({ removeConditionContext })
 local remoteConditionMenuSelected = ContextMenu.new({ removeConditionContextSelected })
@@ -189,7 +190,7 @@ local queuedCountUpdates = {}
 local renderedCallLog
 local renderedCallButtons = {}
 local unpackValues = table.unpack or unpack
-local callDetails
+local detailsGeneration = 0
 
 local function getMaxRenderedLogs()
 	local settings = oh.Settings or {}
@@ -231,6 +232,7 @@ local function clearSelectedCall(button)
 	selected.func = nil
 	selected.callInfo = nil
 	selected.callPodButton = nil
+	selected.hexViewEnabled = nil
 
 	if updateCallInspector then
 		updateCallInspector()
@@ -247,18 +249,54 @@ local function guardSelectedCall(title)
 	end
 
 	clearSelectedCall()
-	if callDetails then
-		callDetails:Show(title or "No Call Selected", "Select a captured call to inspect.")
-	end
+	detailsGeneration = detailsGeneration + 1
+	TextViewer.Show(title or "No Call Selected", "Select a captured call to inspect.")
 	return false
 end
 
+local function renderDetails(title, text, options)
+	TextViewer.Show(title, text, options)
+end
+
 local function showDetails(title, text, options)
-	if callDetails then
-		callDetails:Show(title, text, options)
-	else
-		TextViewer.Show(title, text, options)
+	detailsGeneration = detailsGeneration + 1
+	renderDetails(title, text, options)
+end
+
+local function showDetailsAsync(title, loadingText, callback, options)
+	if not guardSelectedCall(title) then
+		return
 	end
+
+	detailsGeneration = detailsGeneration + 1
+	local generation = detailsGeneration
+	local callInfo = selected.callInfo
+	renderDetails(title, loadingText)
+
+	task.spawn(function()
+		local text
+
+		local function inspect()
+			local ran, result = pcall(callback, callInfo)
+			text = ran and result or ("Inspector failed: " .. tostring(result))
+		end
+
+		local inspected, inspectError = pcall(function()
+			if type(withExecutorIdentity) == "function" then
+				withExecutorIdentity(inspect)
+			else
+				inspect()
+			end
+		end)
+
+		if not inspected then
+			text = "Inspector failed: " .. tostring(inspectError)
+		end
+
+		if generation == detailsGeneration and selected.callInfo == callInfo then
+			renderDetails(title, text or "No inspection data was returned.", options)
+		end
+	end)
 end
 
 local function resetRenderedCalls()
@@ -532,6 +570,71 @@ local function describeCallStack(callInfo)
 	return table.concat(lines, "\n")
 end
 
+local function describeDiagnostics()
+	local diagnostics = Methods.Diagnostics or {}
+	local remoteModel = selected.remoteLog and selected.remoteLog.Remote
+	local callInfo = selected.callInfo or {}
+	local lines = {
+		"REMOTE CAPTURE DIAGNOSTICS",
+		("Selected state: %s"):format(
+			callInfo.blocked and "blocked"
+				or (callInfo.error and "forward error")
+				or (callInfo.forwarded and "forwarded")
+				or "captured"
+		),
+		("Capture route: %s"):format(tostring(callInfo.caller and callInfo.caller.captureSource or "unknown")),
+		("Visible row: %s"):format(
+			selected.callPodButton and selected.callPodButton.Instance and selected.callPodButton.Instance.Parent and "yes"
+				or "no (selection retained in memory)"
+		),
+		("Remote blocked: %s"):format(tostring(remoteModel and remoteModel.Blocked == true)),
+		("Remote ignored: %s"):format(tostring(remoteModel and remoteModel.Ignored == true)),
+		"",
+		"Session counters:",
+	}
+	local counterNames = {
+		"CallsCaptured",
+		"CallsForwarded",
+		"CallsBlocked",
+		"ForwardErrors",
+		"CallsDeduplicated",
+		"CaptureErrors",
+		"LogsDropped",
+		"StackCaptures",
+		"StackCapturesRateLimited",
+		"DirectHooksInstalled",
+		"DirectHookFailures",
+		"OthHookAttempts",
+		"OthHookFailures",
+		"FunctionHookAttempts",
+		"FunctionHookFailures",
+	}
+
+	for _, name in ipairs(counterNames) do
+		lines[#lines + 1] = ("  %-28s %s"):format(name .. ":", tostring(diagnostics[name] or 0))
+	end
+
+	lines[#lines + 1] = ""
+	lines[#lines + 1] = "Namecall hook: "
+		.. (diagnostics.NamecallHookInstalled and "installed" or (diagnostics.NamecallHookFailure or "not installed"))
+
+	if type(diagnostics.LastCaptureError) == "table" then
+		lines[#lines + 1] = ("Last capture error: %s - %s"):format(
+			tostring(diagnostics.LastCaptureError.Stage or "unknown"),
+			tostring(diagnostics.LastCaptureError.Error or "unknown")
+		)
+	end
+
+	if type(diagnostics.LastHookError) == "table" then
+		lines[#lines + 1] = ("Last hook error: %s - %s"):format(
+			tostring(diagnostics.LastHookError.Stage or "unknown"),
+			tostring(diagnostics.LastHookError.Error or "unknown")
+		)
+	end
+
+	return table.concat(lines, "\n")
+end
+
 local callInspector
 
 local function hasSelectedCall()
@@ -572,6 +675,7 @@ updateCallInspector = function()
 		callInspector:SetEnabled("SpyFunction", false)
 		callInspector:SetEnabled("Repeat", false)
 		callInspector:SetEnabled("Hex", false)
+		callInspector:SetEnabled("Diagnostics", false)
 		return
 	end
 
@@ -599,13 +703,8 @@ updateCallInspector = function()
 	callInspector:SetEnabled("ScriptPath", typeof(selected.callingScript) == "Instance")
 	callInspector:SetEnabled("SpyFunction", type(selected.func) == "function")
 	callInspector:SetEnabled("Repeat", method ~= nil and remoteInstance ~= nil)
-	callInspector:SetEnabled(
-		"Hex",
-		hasStringArg()
-			and selected.callPodButton
-			and selected.callPodButton.Instance
-			and selected.callPodButton.Instance.Parent
-	)
+	callInspector:SetEnabled("Hex", hasStringArg())
+	callInspector:SetEnabled("Diagnostics", true)
 end
 
 local function selectCall(log, button, callInfo)
@@ -614,7 +713,9 @@ local function selectCall(log, button, callInfo)
 	selected.func = callInfo.func
 	selected.callInfo = callInfo
 	selected.callPodButton = button
+	selected.hexViewEnabled = button and button.hexViewEnabled == true or false
 	updateCallInspector()
+	showDetails("Remote Call Stack", describeCallStack(callInfo))
 end
 
 local function checkCurrentIgnored()
@@ -1466,17 +1567,19 @@ removeContextSelected:SetCallback(function()
 	selected.logs = {}
 end)
 
-local function getSelectedReplayScript()
-	if not guardSelectedCall("Replay Code") then
-		return nil
-	elseif type(buildRemoteScript) ~= "function" then
+local function buildReplayScript(remoteLog, callInfo, args)
+	if type(buildRemoteScript) ~= "function" then
 		return nil, "The replay-script builder is unavailable."
 	end
 
-	local remoteInstance = selected.remoteLog.Remote.Instance
-	local method = getRemoteMethod(remoteInstance, selected.callInfo)
-	local ran, script, buildError =
-		pcall(buildRemoteScript, remoteInstance, method, selected.args or {}, selected.callInfo)
+	local remoteInstance = remoteLog and remoteLog.Remote and remoteLog.Remote.Instance
+
+	if not remoteInstance then
+		return nil, "The selected remote is no longer available."
+	end
+
+	local method = getRemoteMethod(remoteInstance, callInfo)
+	local ran, script, buildError = pcall(buildRemoteScript, remoteInstance, method, args or {}, callInfo)
 
 	if not ran then
 		return nil, tostring(script)
@@ -1488,41 +1591,66 @@ local function getSelectedReplayScript()
 end
 
 local function generateReplayScript()
-	local oldStatus = oh.getStatus()
-	oh.setStatus("Building replay code ...")
-
-	local script, buildError = getSelectedReplayScript()
-	oh.setStatus(oldStatus)
-
-	if not script then
-		if buildError then
-			showDetails("Replay Code Unavailable", buildError)
-		end
-
+	if not guardSelectedCall("Replay Code") then
 		return
 	end
 
-	showDetails("Remote Replay Code", script, { Editable = true })
+	detailsGeneration = detailsGeneration + 1
+	local generation = detailsGeneration
+	local callInfo = selected.callInfo
+	local remoteLog = selected.remoteLog
+	local args = selected.args or {}
+	renderDetails("Remote Replay Code", "Building compact replay code ...")
+
+	task.spawn(function()
+		local script, buildError = buildReplayScript(remoteLog, callInfo, args)
+
+		if generation ~= detailsGeneration or selected.callInfo ~= callInfo then
+			return
+		elseif not script then
+			renderDetails("Replay Code Unavailable", buildError or "Replay code could not be generated.")
+			return
+		end
+
+		renderDetails("Remote Replay Code", script, { Editable = true })
+	end)
 end
 
 local function copyReplayScript()
-	local script, buildError = getSelectedReplayScript()
-
-	if not script then
-		if buildError then
-			showDetails("Replay Code Unavailable", buildError)
-		end
-
+	if not guardSelectedCall("Copy Replay Code") then
 		return
 	end
 
-	local copied, copyError = pcall(setClipboard, script)
+	local callInfo = selected.callInfo
+	local remoteLog = selected.remoteLog
+	local args = selected.args or {}
+	oh.setStatus("Building replay code ...")
 
-	if not copied then
-		showDetails("Copy Failed", tostring(copyError))
-	else
-		oh.setStatus("Replay code copied")
-	end
+	task.spawn(function()
+		local script, buildError = buildReplayScript(remoteLog, callInfo, args)
+
+		if not script then
+			oh.setStatus("Replay code unavailable")
+
+			if selected.callInfo == callInfo then
+				showDetails("Replay Code Unavailable", buildError or "Replay code could not be generated.")
+			end
+
+			return
+		end
+
+		local copied, copyError = pcall(setClipboard, script)
+
+		if not copied then
+			oh.setStatus("Replay code copy failed")
+
+			if selected.callInfo == callInfo then
+				showDetails("Copy Failed", tostring(copyError))
+			end
+		else
+			oh.setStatus("Replay code copied")
+		end
+	end)
 end
 
 local function showArguments()
@@ -1556,28 +1684,28 @@ local function showCallStack()
 	showDetails("Remote Call Stack", describeCallStack(selected.callInfo))
 end
 
-local function showFunctionStack()
-	if not guardSelectedCall("Remote Function Stack") then
-		return
+local function showDiagnostics()
+	if guardSelectedCall("Capture Diagnostics") then
+		showDetails("Capture Diagnostics", describeDiagnostics())
 	end
+end
 
-	showDetails("Remote Function Stack", describeStackFunctions(selected.callInfo))
+local function showFunctionStack()
+	showDetailsAsync("Remote Function Stack", "Inspecting captured stack functions ...", describeStackFunctions)
 end
 
 local function inspectCallingFunction()
-	if not guardSelectedCall("Calling Function") then
-		return
-	end
-
-	showDetails("Calling Function", describeFunction(selected.func))
+	local func = selected.func
+	showDetailsAsync("Calling Function", "Inspecting calling function ...", function()
+		return describeFunction(func)
+	end)
 end
 
 local function inspectCallingScript()
-	if not guardSelectedCall("Calling Script") then
-		return
-	end
-
-	showDetails("Calling Script", describeScript(selected.callingScript))
+	local scriptInstance = selected.callingScript
+	showDetailsAsync("Calling Script", "Decompiling calling script ...", function()
+		return describeScript(scriptInstance)
+	end)
 end
 
 local function copyCallingScriptPath()
@@ -1690,22 +1818,63 @@ local function repeatSelectedCall()
 	)
 end
 
+local function describeStringValues(args, asHex)
+	local lines = {
+		asHex and "CAPTURED STRING ARGUMENTS (HEX)" or "CAPTURED STRING ARGUMENTS",
+		"",
+	}
+	local maxHexBytes = getMaxHexBytes()
+	local argCount = getArgCount(args)
+	local found = false
+
+	for index = 1, argCount do
+		local value = args[index]
+
+		if type(value) == "string" then
+			found = true
+
+			if asHex then
+				local parts = {}
+				local bytes = math.min(#value, maxHexBytes)
+
+				for byteIndex = 1, bytes do
+					parts[byteIndex] = string.format("%02X", value:byte(byteIndex, byteIndex))
+				end
+
+				local hex = table.concat(parts, " ")
+
+				if #value > bytes then
+					hex = hex .. (" ... (%d/%d bytes shown)"):format(bytes, #value)
+				end
+
+				lines[#lines + 1] = ("[%02d] %s"):format(index, hex)
+			else
+				lines[#lines + 1] = ("[%02d] %s"):format(index, argumentSummary(value))
+			end
+		end
+	end
+
+	if not found then
+		lines[#lines + 1] = "(no string arguments)"
+	end
+
+	return table.concat(lines, "\n")
+end
+
 local function toggleHexView()
 	if not guardSelectedCall("Toggle String Hex View") or not selected.args then
 		return
-	elseif
-		not (selected.callPodButton and selected.callPodButton.Instance and selected.callPodButton.Instance.Parent)
-	then
-		return showDetails(
-			"String Hex View",
-			"The selected call is still retained, but its visible row is not currently rendered. Select it in the newest-call list to toggle inline hex labels."
-		)
 	end
 
-	selected.callPodButton.hexViewEnabled = not selected.callPodButton.hexViewEnabled
-	if not selected.callPodButton.oldStrings then
-		selected.callPodButton.oldStrings = {}
+	selected.hexViewEnabled = not selected.hexViewEnabled
+	local callButton = selected.callPodButton
+
+	if not (callButton and callButton.Instance and callButton.Instance.Parent) then
+		return showDetails("String Arguments", describeStringValues(selected.args, selected.hexViewEnabled))
 	end
+
+	callButton.hexViewEnabled = selected.hexViewEnabled
+	callButton.oldStrings = callButton.oldStrings or {}
 
 	local maxHexBytes = getMaxHexBytes()
 	local argCount = getArgCount(selected.args)
@@ -1714,12 +1883,12 @@ local function toggleHexView()
 		local arg = selected.args[idx]
 
 		if type(arg) == "string" then
-			local argRow = selected.callPodButton.Instance.Contents:FindFirstChild(tostring(idx))
+			local argRow = callButton.Instance.Contents:FindFirstChild(tostring(idx))
 			local textObject = argRow and argRow.Label
 
 			if textObject then
-				if selected.callPodButton.hexViewEnabled then
-					selected.callPodButton.oldStrings[idx] = arg
+				if callButton.hexViewEnabled then
+					callButton.oldStrings[idx] = arg
 					local parts = {}
 					local bytes = math.min(#arg, maxHexBytes)
 
@@ -1735,7 +1904,7 @@ local function toggleHexView()
 
 					textObject.Text = hexString
 				else
-					textObject.Text = argumentSummary(selected.callPodButton.oldStrings[idx])
+					textObject.Text = argumentSummary(callButton.oldStrings[idx] or arg)
 				end
 			end
 		end
@@ -1754,8 +1923,7 @@ callingScriptContext:SetCallback(copyCallingScriptPath)
 spyClosureContext:SetCallback(spyCallingFunction)
 repeatCallContext:SetCallback(repeatSelectedCall)
 viewAsHexContext:SetCallback(toggleHexView)
-
-callDetails = InlineViewer.Install(RemoteLogs, { HeightScale = 0.42 })
+diagnosticsContext:SetCallback(showDiagnostics)
 
 callInspector = ActionPanel.Install(LogsButtons, RemoteLogs.Results, {
 	Columns = 4,
@@ -1772,6 +1940,7 @@ callInspector = ActionPanel.Install(LogsButtons, RemoteLogs.Results, {
 		{ Name = "SpyFunction", Label = "Spy Caller", Icon = icons.spy, Callback = spyCallingFunction },
 		{ Name = "Repeat", Label = "Replay", Icon = icons.repeatCall, Callback = repeatSelectedCall },
 		{ Name = "Hex", Label = "Hex", Icon = icons.hex, Callback = toggleHexView },
+		{ Name = "Diagnostics", Label = "Diagnostics", Icon = icons.status, Callback = showDiagnostics },
 	},
 })
 updateCallInspector()

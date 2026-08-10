@@ -18,7 +18,6 @@ if prefetch then
 		"ui/controls/List",
 		"ui/controls/ContextMenu",
 		"ui/controls/TextViewer",
-		"ui/controls/InlineViewer",
 		"ui/controls/FunctionInspector",
 		"ui/controls/ActionPanel",
 		"ui/modules/RemoteSpy",

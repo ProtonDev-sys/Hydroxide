@@ -16,7 +16,6 @@ local Dropdown = import("ui/controls/Dropdown")
 local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local TextViewer = import("ui/controls/TextViewer")
-local InlineViewer = import("ui/controls/InlineViewer")
 local FunctionInspector = import("ui/controls/FunctionInspector")
 local ActionPanel = import("ui/controls/ActionPanel")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
@@ -155,7 +154,7 @@ local queuedLogRenders = {}
 local queuedCountUpdates = {}
 local renderedCallLog
 local renderedCallButtons = {}
-local callDetails
+local detailsGeneration = 0
 
 local function getMaxRenderedLogs()
 	local settings = oh.Settings or {}
@@ -206,18 +205,54 @@ local function guardSelectedCall(title)
 	end
 
 	clearSelectedCall()
-	if callDetails then
-		callDetails:Show(title or "No Call Selected", "Select a captured call to inspect.")
-	end
+	detailsGeneration = detailsGeneration + 1
+	TextViewer.Show(title or "No Call Selected", "Select a captured call to inspect.")
 	return false
 end
 
+local function renderDetails(title, text, options)
+	TextViewer.Show(title, text, options)
+end
+
 local function showDetails(title, text, options)
-	if callDetails then
-		callDetails:Show(title, text, options)
-	else
-		TextViewer.Show(title, text, options)
+	detailsGeneration = detailsGeneration + 1
+	renderDetails(title, text, options)
+end
+
+local function showDetailsAsync(title, loadingText, callback, options)
+	if not guardSelectedCall(title) then
+		return
 	end
+
+	detailsGeneration = detailsGeneration + 1
+	local generation = detailsGeneration
+	local call = selected.callInfo
+	renderDetails(title, loadingText)
+
+	task.spawn(function()
+		local text
+
+		local function inspect()
+			local ran, result = pcall(callback, call)
+			text = ran and result or ("Inspector failed: " .. tostring(result))
+		end
+
+		local inspected, inspectError = pcall(function()
+			if type(withExecutorIdentity) == "function" then
+				withExecutorIdentity(inspect)
+			else
+				inspect()
+			end
+		end)
+
+		if not inspected then
+			text = "Inspector failed: " .. tostring(inspectError)
+		end
+
+		if generation == detailsGeneration and selected.callInfo == call then
+			renderDetails(title, text or "No inspection data was returned.", options)
+		end
+	end)
 end
 
 local function resetRenderedCalls()
@@ -543,6 +578,7 @@ local function selectCall(_log, button, call)
 	selected.callInfo = call
 	selected.callPodButton = button
 	updateCallInspector()
+	showDetails("Closure Call Stack", describeCallStack(call))
 end
 
 local function checkCurrentIgnored()
@@ -1350,36 +1386,28 @@ local function showCallStack()
 end
 
 local function showFunctionStack()
-	if not guardSelectedCall("Closure Function Stack") then
-		return
-	end
-
-	showDetails("Closure Function Stack", describeStackFunctions(selected.callInfo))
+	showDetailsAsync("Closure Function Stack", "Inspecting captured stack functions ...", describeStackFunctions)
 end
 
 local function inspectCallingFunction()
-	if not guardSelectedCall("Calling Function") then
-		return
-	end
-
-	showDetails("Calling Function", describeFunction(selected.func))
+	local func = selected.func
+	showDetailsAsync("Calling Function", "Inspecting calling function ...", function()
+		return describeFunction(func)
+	end)
 end
 
 local function inspectTargetFunction()
-	if not guardSelectedCall("Target Function") then
-		return
-	end
-
 	local func = selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Target
-	showDetails("Target Function", describeFunction(func))
+	showDetailsAsync("Target Function", "Inspecting target function ...", function()
+		return describeFunction(func)
+	end)
 end
 
 local function inspectCallingScript()
-	if not guardSelectedCall("Calling Script") then
-		return
-	end
-
-	showDetails("Calling Script", describeScript(selected.callingScript))
+	local scriptInstance = selected.callingScript
+	showDetailsAsync("Calling Script", "Decompiling calling script ...", function()
+		return describeScript(scriptInstance)
+	end)
 end
 
 local function copyCallingScriptPath()
@@ -1438,8 +1466,6 @@ inspectTargetContext:SetCallback(inspectTargetFunction)
 inspectScriptContext:SetCallback(inspectCallingScript)
 callingScriptContext:SetCallback(copyCallingScriptPath)
 spyClosureContext:SetCallback(spyCallingFunction)
-
-callDetails = InlineViewer.Install(ClosureLogs, { HeightScale = 0.42 })
 
 callInspector = ActionPanel.Install(LogsButtons, ClosureLogs.Results, {
 	Columns = 4,

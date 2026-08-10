@@ -14,6 +14,8 @@ local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
 local TabSelector = import("ui/controls/TabSelector")
+local TextViewer = import("ui/controls/TextViewer")
+local FunctionInspector = import("ui/controls/FunctionInspector")
 
 local Page = import("rbxassetid://11389137937").Base.Body.Pages.ConstantScanner
 local Assets = import("rbxassetid://5042114982").ConstantScanner
@@ -25,8 +27,10 @@ local SearchBox = Query.Query
 local constantList = List.new(Page.Results.Clip.Content)
 local constantLogs = {}
 local selectedLog 
+local inspectGeneration = 0
 
 local spyClosureContext = ContextMenuButton.new("rbxassetid://4666593447", "Spy Closure")
+local inspectFunctionContext = ContextMenuButton.new("rbxassetid://4800244808", "Inspect Function")
 local viewConstantsContext = ContextMenuButton.new("rbxassetid://5179169654", "View All Constants")
 local getScriptContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Script Path")
 
@@ -35,7 +39,44 @@ local constants = {
     tempBorderColor = Color3.fromRGB(20, 0, 0)
 }
 
-constantList:BindContextMenu(ContextMenu.new({ spyClosureContext, viewConstantsContext, getScriptContext }))
+constantList:BindContextMenu(ContextMenu.new({ inspectFunctionContext, spyClosureContext, viewConstantsContext, getScriptContext }))
+
+local function inspectSelectedFunction()
+    if not selectedLog then
+        return
+    end
+
+    inspectGeneration = inspectGeneration + 1
+    local generation = inspectGeneration
+    local log = selectedLog
+    TextViewer.Show("Function Inspector", "Inspecting function metadata, constants, upvalues, protos, environment, and source ...")
+
+    task.spawn(function()
+        local text
+        local inspected, inspectError = pcall(function()
+            local function inspect()
+                text = FunctionInspector.DescribeFunction(log.Closure.Data, {
+                    GetPath = function(instance)
+                        return getInstancePath(instance)
+                    end
+                })
+            end
+
+            if type(withExecutorIdentity) == "function" then
+                withExecutorIdentity(inspect)
+            else
+                inspect()
+            end
+        end)
+
+        if generation == inspectGeneration and selectedLog == log then
+            TextViewer.Show(
+                "Function Inspector",
+                inspected and (text or "No function information was returned.") or ("Function inspection failed:\n" .. tostring(inspectError))
+            )
+        end
+    end)
+end
 
 local function addConstant(constant, temporary)
     local constantLog = Assets.Constant:Clone()
@@ -98,6 +139,11 @@ function Log.new(closure)
         selectedLog = log
     end)
 
+    listButton:SetCallback(function()
+        selectedLog = log
+        inspectSelectedFunction()
+    end)
+
     constantLogs[closure.Data] = log
 
     log.Closure = closure
@@ -132,6 +178,10 @@ end
 
 local SpyHook = ClosureSpy.Hook
 spyClosureContext:SetCallback(function()
+    if not selectedLog then
+        return
+    end
+
     local selectedClosure = selectedLog.Closure
 
     if TabSelector.SelectTab("ClosureSpy") then
@@ -144,6 +194,8 @@ spyClosureContext:SetCallback(function()
         end
     end
 end)
+
+inspectFunctionContext:SetCallback(inspectSelectedFunction)
 
 viewConstantsContext:SetCallback(function()
     if selectedLog then
