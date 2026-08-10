@@ -11,6 +11,7 @@ end
 local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
+local TextViewer = import("ui/controls/TextViewer")
 
 local Page = import("rbxassetid://11389137937").Base.Body.Pages.ScriptScanner
 local Assets = import("rbxassetid://5042114982").ScriptScanner
@@ -64,7 +65,13 @@ local constants = {
 }
 
 local pathContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Script Path")
-scriptList:BindContextMenu(ContextMenu.new({ pathContext }))
+local sourceContext = ContextMenuButton.new("rbxassetid://4800244808", "View Script Source")
+local protoSourceContext = ContextMenuButton.new("rbxassetid://4800244808", "View Function Source")
+local constantSourceContext = ContextMenuButton.new("rbxassetid://4800244808", "View Function Source")
+
+scriptList:BindContextMenu(ContextMenu.new({ pathContext, sourceContext }))
+protosList:BindContextMenu(ContextMenu.new({ protoSourceContext }))
+constantsList:BindContextMenu(ContextMenu.new({ constantSourceContext }))
 
 pathContext:SetCallback(function()
     local selectedInstance = selected.logContext.LocalScript.Instance
@@ -72,6 +79,22 @@ pathContext:SetCallback(function()
     setClipboard(getInstancePath(selectedInstance))
     MessageBox.Show("Success", ("%s's path was copied to your clipboard."):format(selectedInstance.Name), MessageType.OK)
 end)
+
+local function runPrivileged(callback)
+    if withExecutorIdentity then
+        withExecutorIdentity(callback)
+    else
+        callback()
+    end
+end
+
+local function showSource(title, source, errorMessage)
+    if source then
+        TextViewer.Show(title, source)
+    else
+        MessageBox.Show("Cannot view source", errorMessage or "Source is unavailable", MessageType.OK)
+    end
+end
 
 local function createProto(index, value)
     local instance = Assets.ProtoPod:Clone()
@@ -93,7 +116,11 @@ local function createProto(index, value)
     information.Icon.Position = UDim2.new(0, indexWidth, 0, 2)
     information.Label.Position = UDim2.new(0, indexWidth + 20, 0, 0)
 
-    ListButton.new(instance, protosList)
+    local button = ListButton.new(instance, protosList)
+
+    button:SetRightCallback(function()
+        selected.protoFunction = value
+    end)
 end
 
 local function createConstant(index, value)
@@ -123,7 +150,11 @@ local function createConstant(index, value)
         information.Label.Text = toString(value)
     end
     
-    ListButton.new(instance, constantsList)
+    local button = ListButton.new(instance, constantsList)
+
+    button:SetRightCallback(function()
+        selected.constantValue = value
+    end)
 end
 
 -- Log Object
@@ -138,13 +169,18 @@ function Log.new(localScript)
 
     button.Name = scriptName
     button:FindFirstChild("Name").Text = scriptName
-    button.Protos.Text = #localScript.Protos
-    button.Constants.Text = #localScript.Constants
+    button.Protos.Text = "..."
+    button.Constants.Text = "..."
 
     listButton:SetCallback(function()
         if selected.scriptLog ~= log then
             protosList:Clear()
             constantsList:Clear()
+            selected.protoFunction = nil
+            selected.constantValue = nil
+            ProtosResultsStatus.Text = ""
+            ConstantsResultsStatus.Text = ""
+            EnvironmentResultsStatus.Text = ""
             
             ScriptList.Visible = false
             ScriptInfo.Visible = true
@@ -156,13 +192,37 @@ function Log.new(localScript)
             InfoScript.Label.Size = UDim2.new(0, nameLength, 0, 20)
             InfoScript.Position = UDim2.new(1, -nameLength, 0, 0)
 
-            for i,v in pairs(localScript.Protos) do
-                createProto(i, v)
-            end 
+            runPrivileged(function()
+                local protos, protosError = localScript:LoadProtos()
+                local constantsListData, constantsError = localScript:LoadConstants()
 
-            for i,v in pairs(localScript.Constants) do
-                createConstant(i, v)
-            end
+                button.Protos.Text = protos and #protos or "!"
+                button.Constants.Text = constantsListData and #constantsListData or "!"
+
+                if protos then
+                    protosList:BeginBatch()
+
+                    for i,v in pairs(protos) do
+                        createProto(i, v)
+                    end
+
+                    protosList:EndBatch()
+                elseif protosError then
+                    ProtosResultsStatus.Text = protosError
+                end
+
+                if constantsListData then
+                    constantsList:BeginBatch()
+
+                    for i,v in pairs(constantsListData) do
+                        createConstant(i, v)
+                    end
+
+                    constantsList:EndBatch()
+                elseif constantsError then
+                    ConstantsResultsStatus.Text = constantsError
+                end
+            end)
 
             -- for i,v in pairs(localScript.Environment) do
             --     createEnvironment(i, v)
@@ -190,12 +250,13 @@ end
 local function addScripts(query)
     scriptList:Clear()
     scriptLogs = {}
+    scriptList:BeginBatch()
 
     for _instance, localScript in pairs(Methods.Scan(query)) do
         Log.new(localScript)
     end
 
-    scriptList:Recalculate()
+    scriptList:EndBatch()
 end
 
 ListSearch.FocusLost:Connect(function(returned)
@@ -210,6 +271,45 @@ ListRefresh.MouseButton1Click:Connect(function()
 end)
 
 addScripts()
+
+sourceContext:SetCallback(function()
+    local log = selected.logContext
+
+    if not log then
+        return
+    end
+
+    runPrivileged(function()
+        local source, sourceError = log.LocalScript:Decompile()
+        showSource(log.LocalScript.Instance.Name .. " Source", source, sourceError)
+    end)
+end)
+
+protoSourceContext:SetCallback(function()
+    local log = selected.scriptLog
+
+    if not log or type(selected.protoFunction) ~= "function" then
+        return MessageBox.Show("Cannot view source", "No function is selected", MessageType.OK)
+    end
+
+    runPrivileged(function()
+        local source, sourceError = log.LocalScript:Decompile(selected.protoFunction)
+        showSource("Function Source", source, sourceError)
+    end)
+end)
+
+constantSourceContext:SetCallback(function()
+    local log = selected.scriptLog
+
+    if not log or type(selected.constantValue) ~= "function" then
+        return MessageBox.Show("Cannot view source", "The selected constant is not a function", MessageType.OK)
+    end
+
+    runPrivileged(function()
+        local source, sourceError = log.LocalScript:Decompile(selected.constantValue)
+        showSource("Function Source", source, sourceError)
+    end)
+end)
 
 InfoBack.MouseButton1Click:Connect(function()
     ScriptInfo.Visible = false

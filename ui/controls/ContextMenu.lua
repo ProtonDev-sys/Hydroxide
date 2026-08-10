@@ -122,11 +122,13 @@ function ContextMenu.hide(contextMenu)
     contextMenu.Instance.Visible = false
 end
 
-UserInput.InputEnded:Connect(function(input)
+local inputEndedConnection = UserInput.InputEnded:Connect(function(input)
     if currentContextMenu and input.UserInputType == Enum.UserInputType.MouseButton1 then
         currentContextMenu:Hide()
         currentContextMenu = nil
     end
 end)
+
+oh.Events[#oh.Events + 1] = inputEndedConnection
 
 return ContextMenu, ContextMenuButton

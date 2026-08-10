@@ -8,6 +8,7 @@ end
 local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
+local TextViewer = import("ui/controls/TextViewer")
 
 local Page = import("rbxassetid://11389137937").Base.Body.Pages.ModuleScanner
 local Assets = import("rbxassetid://5042114982").ModuleScanner
@@ -22,7 +23,8 @@ local moduleLogs = {}
 local selectedLog
 
 local pathContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Module Path")
-moduleList:BindContextMenu(ContextMenu.new({ pathContext }))
+local sourceContext = ContextMenuButton.new("rbxassetid://4800244808", "View Module Source")
+moduleList:BindContextMenu(ContextMenu.new({ pathContext, sourceContext }))
 
 pathContext:SetCallback(function()
     local selectedInstance = selectedLog.ModuleScript.Instance
@@ -30,6 +32,29 @@ pathContext:SetCallback(function()
     setClipboard(getInstancePath(selectedInstance))
     MessageBox.Show("Success", ("%s's path was copied to your clipboard."):format(selectedInstance.Name), MessageType.OK)
 end)
+
+local function runPrivileged(callback)
+    if withExecutorIdentity then
+        withExecutorIdentity(callback)
+    else
+        callback()
+    end
+end
+
+local function showSource(title, source, errorMessage)
+    if source then
+        TextViewer.Show(title, source)
+    else
+        MessageBox.Show("Cannot view source", errorMessage or "Source is unavailable", MessageType.OK)
+    end
+end
+
+local function viewModuleSource(moduleScript)
+    runPrivileged(function()
+        local source, sourceError = moduleScript:Decompile()
+        showSource(moduleScript.Instance.Name .. " Source", source, sourceError)
+    end)
+end
 
 -- Log Object
 
@@ -43,8 +68,12 @@ function Log.new(moduleScript)
     
     button.Name = moduleInstance.Name
     button:FindFirstChild("Name").Text = moduleInstance.Name
-    button.Protos.Text = #moduleScript.Protos
-    button.Constants.Text = #moduleScript.Constants
+    button.Protos.Text = "-"
+    button.Constants.Text = "-"
+
+    listButton:SetCallback(function()
+        viewModuleSource(moduleScript)
+    end)
 
     listButton:SetRightCallback(function()
         selectedLog = log
@@ -57,17 +86,26 @@ function Log.new(moduleScript)
     return log
 end
 
+sourceContext:SetCallback(function()
+    if not selectedLog then
+        return
+    end
+
+    viewModuleSource(selectedLog.ModuleScript)
+end)
+
 -- UI Functionality
 
 local function addModules(query)
     moduleList:Clear()
     moduleLogs = {}
+    moduleList:BeginBatch()
 
     for _moduleInstance, moduleScript in pairs(Methods.Scan(query)) do
         Log.new(moduleScript)
     end
 
-    moduleList:Recalculate()
+    moduleList:EndBatch()
 end
 
 Search.FocusLost:Connect(function(returned)

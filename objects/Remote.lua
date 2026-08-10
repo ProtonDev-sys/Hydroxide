@@ -1,11 +1,34 @@
 local Remote = {}
 
-function Remote.new(instance)
+local DEFAULT_MAX_LOGS = 500
+
+local function normalizeMaxLogs(value)
+    value = tonumber(value)
+
+    if not value then
+        return DEFAULT_MAX_LOGS
+    end
+
+    return math.max(1, math.floor(value))
+end
+
+local function argumentCount(args)
+    if type(args.n) == "number" then
+        return math.max(0, math.floor(args.n))
+    end
+
+    return #args
+end
+
+function Remote.new(instance, maxLogs)
     local remote = {}
 
     remote.Instance = instance
     remote.Logs = {}
     remote.Calls = 0
+    remote.TotalCalls = 0
+    remote.DroppedCalls = 0
+    remote.MaxLogs = normalizeMaxLogs(maxLogs)
     remote.Blocked = false
     remote.Ignored = false
     remote.Clear = Remote.clear
@@ -29,6 +52,8 @@ end
 
 function Remote.clear(remote)
     remote.Calls = 0
+    remote.TotalCalls = 0
+    remote.DroppedCalls = 0
     remote.Logs = {}
 end
 
@@ -98,10 +123,13 @@ end
 function Remote.areArgsBlocked(remote, args)
     local blockedArgs = remote.BlockedArgs
 
-    for index, value in pairs(args) do
+    for index = 1, argumentCount(args) do
+        local value = args[index]
         local indexBlock = blockedArgs[index]
 
-        if indexBlock and (indexBlock.types[typeof(value)] or indexBlock.values[value] ~= nil) then
+        if indexBlock
+            and (indexBlock.types[typeof(value)] or (value ~= nil and indexBlock.values[value] ~= nil))
+        then
             return true
         end
     end
@@ -112,10 +140,13 @@ end
 function Remote.areArgsIgnored(remote, args)
     local ignoredArgs = remote.IgnoredArgs
 
-    for index, value in pairs(args) do
+    for index = 1, argumentCount(args) do
+        local value = args[index]
         local indexIgnore = ignoredArgs[index]
 
-        if indexIgnore and (indexIgnore.types[typeof(value)] or indexIgnore.values[value] ~= nil) then
+        if indexIgnore
+            and (indexIgnore.types[typeof(value)] or (value ~= nil and indexIgnore.values[value] ~= nil))
+        then
             return true
         end
     end
@@ -124,8 +155,20 @@ function Remote.areArgsIgnored(remote, args)
 end
 
 function Remote.incrementCalls(remote, call)
+    local logs = remote.Logs
+    local dropped = false
+
     remote.Calls = remote.Calls + 1
-    table.insert(remote.Logs, call)
+    remote.TotalCalls = remote.TotalCalls + 1
+    logs[#logs + 1] = call
+
+    if #logs > remote.MaxLogs then
+        table.remove(logs, 1)
+        remote.DroppedCalls = remote.DroppedCalls + 1
+        dropped = true
+    end
+
+    return dropped
 end
 
 function Remote.decrementCalls(remote, call)

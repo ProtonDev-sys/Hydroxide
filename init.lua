@@ -11,12 +11,31 @@ local config = type(environment.HydroxideConfig) == "table" and environment.Hydr
 local web = config.web ~= false
 local user = config.owner or "ProtonDev-sys"
 local repository = config.repository or "Hydroxide"
-local branch = config.branch or "revision"
+local branch = config.branch or "potassium-modernization-fork"
 local importCache = {}
 local pack = table.pack or function(...)
     return { n = select("#", ...), ... }
 end
 local unpackValues = table.unpack or unpack
+
+local function numberSetting(name, defaultValue, minimum, maximum)
+    local value = tonumber(config[name]) or defaultValue
+
+    value = math.floor(value)
+    return math.max(minimum, math.min(maximum, value))
+end
+
+local runtimeSettings = {
+    CaptureExecutorCalls = config.captureExecutorCalls ~= false,
+    CaptureCallStacks = config.captureCallStacks ~= false,
+    MaxStackFrames = numberSetting("maxStackFrames", 24, 1, 64),
+    MaxRemoteLogs = numberSetting("maxRemoteLogs", 500, 25, 5000),
+    MaxClosureLogs = numberSetting("maxClosureLogs", 500, 25, 5000),
+    MaxRenderedLogs = numberSetting("maxRenderedLogs", 100, 10, 500),
+    MaxArgumentPreviewLength = numberSetting("maxArgumentPreviewLength", 240, 40, 2000),
+    MaxHexBytes = numberSetting("maxHexBytes", 512, 32, 8192),
+    MaxConcurrentImports = numberSetting("maxConcurrentImports", 6, 1, 12)
+}
 
 local function pick(...)
     for index = 1, select("#", ...) do
@@ -109,11 +128,14 @@ local canonicalMethods = {
     newcclosure = pick(newcclosure, environment.newcclosure),
     hookfunction = pick(hookfunction, detour_function, environment.hookfunction),
     restorefunction = pick(restorefunction, environment.restorefunction),
+    decompile = pick(decompile, environment.decompile),
     filtergc = pick(filtergc, environment.filtergc),
     getgc = pick(getgc, get_gc_objects, environment.getgc),
+    getcallstack = pick(debug.getcallstack, getcallstack, environment.getcallstack),
     getinfo = pick(debug.getinfo, getinfo),
     getsenv = pick(getsenv, environment.getsenv),
     getmenv = pick(getsenv, getmenv),
+    gettenv = pick(gettenv, environment.gettenv),
     getthreadidentity = pick(
         getthreadidentity,
         getidentity,
@@ -123,9 +145,12 @@ local canonicalMethods = {
         syn and syn.get_thread_identity
     ),
     getconnections = pick(getconnections, get_signal_cons),
+    getscriptbytecode = pick(getscriptbytecode, environment.getscriptbytecode),
     getscriptclosure = pick(getscriptclosure, get_script_function),
     getscriptfromthread = pick(getscriptfromthread, environment.getscriptfromthread),
     getrunningscripts = pick(getrunningscripts, environment.getrunningscripts),
+    getscripthash = pick(getscripthash, environment.getscripthash),
+    getscripts = pick(getscripts, environment.getscripts),
     getnamecallmethod = pick(getnamecallmethod, get_namecall_method),
     getcallingscript = pick(getcallingscript, get_calling_script),
     getloadedmodules = pick(getloadedmodules, get_loaded_modules),
@@ -175,7 +200,8 @@ local canonicalMethods = {
     oth_hook = othLibrary and othLibrary.hook,
     oth_unhook = othLibrary and othLibrary.unhook,
     oth_get_root_callback = othLibrary and othLibrary.get_root_callback,
-    oth_get_original_thread = othLibrary and othLibrary.get_original_thread
+    oth_get_original_thread = othLibrary and othLibrary.get_original_thread,
+    oth_is_hook_thread = othLibrary and othLibrary.is_hook_thread
 }
 
 canonicalMethods.hookmetamethod = makeHookMetaMethod(canonicalMethods.getrawmetatable)
@@ -235,6 +261,8 @@ local function setThreadIdentityCompat(identity)
     end
 end
 
+local executorIdentity
+
 local function withThreadIdentityCompat(identity, callback, ...)
     if not (canonicalMethods.getthreadidentity and canonicalMethods.setthreadidentity) then
         return callback(...)
@@ -243,6 +271,8 @@ local function withThreadIdentityCompat(identity, callback, ...)
     local oldIdentity = getThreadIdentityCompat()
 
     if oldIdentity == nil then
+        return callback(...)
+    elseif oldIdentity == identity then
         return callback(...)
     end
 
@@ -260,6 +290,14 @@ local function withThreadIdentityCompat(identity, callback, ...)
     end
 
     return unpackValues(results, 2, results.n)
+end
+
+local function withExecutorIdentityCompat(callback, ...)
+    if executorIdentity == nil then
+        return callback(...)
+    end
+
+    return withThreadIdentityCompat(executorIdentity, callback, ...)
 end
 
 local function getLuaClosuresCompat()
@@ -332,17 +370,23 @@ local globalMethods = {
     newcclosure = canonicalMethods.newcclosure,
     hookfunction = canonicalMethods.hookfunction,
     restorefunction = canonicalMethods.restorefunction,
+    decompile = canonicalMethods.decompile,
     filtergc = canonicalMethods.filtergc,
     getgc = canonicalMethods.getgc,
     getluaclosures = getLuaClosuresCompat,
+    getcallstack = canonicalMethods.getcallstack,
     getinfo = canonicalMethods.getinfo,
     getsenv = canonicalMethods.getsenv,
     getmenv = canonicalMethods.getmenv,
+    gettenv = canonicalMethods.gettenv,
     getthreadidentity = canonicalMethods.getthreadidentity,
     getconnections = canonicalMethods.getconnections,
+    getscriptbytecode = canonicalMethods.getscriptbytecode,
     getscriptclosure = canonicalMethods.getscriptclosure,
     getscriptfromthread = canonicalMethods.getscriptfromthread,
     getrunningscripts = getRunningScriptsCompat,
+    getscripthash = canonicalMethods.getscripthash,
+    getscripts = canonicalMethods.getscripts,
     getnamecallmethod = canonicalMethods.getnamecallmethod,
     getcallingscript = canonicalMethods.getcallingscript,
     getloadedmodules = canonicalMethods.getloadedmodules,
@@ -359,6 +403,9 @@ local globalMethods = {
     setconstant = canonicalMethods.setconstant,
     setthreadidentity = canonicalMethods.setthreadidentity,
     withthreadidentity = canonicalMethods.getthreadidentity and canonicalMethods.setthreadidentity and withThreadIdentityCompat,
+    withExecutorIdentity = canonicalMethods.getthreadidentity
+        and canonicalMethods.setthreadidentity
+        and withExecutorIdentityCompat,
     setupvalue = canonicalMethods.setupvalue,
     setstack = canonicalMethods.setstack,
     setreadonly = canonicalMethods.setreadonly,
@@ -377,7 +424,8 @@ local globalMethods = {
     othHook = canonicalMethods.oth_hook,
     othUnhook = canonicalMethods.oth_unhook,
     othGetRootCallback = canonicalMethods.oth_get_root_callback,
-    othGetOriginalThread = canonicalMethods.oth_get_original_thread
+    othGetOriginalThread = canonicalMethods.oth_get_original_thread,
+    othIsHookThread = canonicalMethods.oth_is_hook_thread
 }
 
 globalMethods.checkCaller = globalMethods.checkcaller
@@ -387,14 +435,19 @@ globalMethods.restoreFunction = globalMethods.restorefunction
 globalMethods.filterGc = globalMethods.filtergc
 globalMethods.getGc = globalMethods.getgc
 globalMethods.getLuaClosures = globalMethods.getluaclosures
+globalMethods.getCallStack = globalMethods.getcallstack
 globalMethods.getInfo = globalMethods.getinfo
 globalMethods.getSenv = globalMethods.getsenv
 globalMethods.getMenv = globalMethods.getmenv
+globalMethods.getTenv = globalMethods.gettenv
 globalMethods.getContext = globalMethods.getthreadidentity
 globalMethods.getConnections = globalMethods.getconnections
+globalMethods.getScriptBytecode = globalMethods.getscriptbytecode
 globalMethods.getScriptClosure = globalMethods.getscriptclosure
 globalMethods.getScriptFromThread = globalMethods.getscriptfromthread
 globalMethods.getRunningScripts = globalMethods.getrunningscripts
+globalMethods.getScriptHash = globalMethods.getscripthash
+globalMethods.getScripts = globalMethods.getscripts
 globalMethods.getNamecallMethod = globalMethods.getnamecallmethod
 globalMethods.getCallingScript = globalMethods.getcallingscript
 globalMethods.getLoadedModules = globalMethods.getloadedmodules
@@ -570,6 +623,14 @@ if globalMethods.identifyexecutor then
     end
 end
 
+if globalMethods.getthreadidentity then
+    local ran, identity = pcall(globalMethods.getthreadidentity)
+
+    if ran and type(identity) == "number" then
+        executorIdentity = identity
+    end
+end
+
 environment.hasMethods = hasMethods
 environment.oh = {
     Events = {},
@@ -578,9 +639,11 @@ environment.oh = {
     DisabledConnections = {},
     Cache = importCache,
     Methods = globalMethods,
+    Settings = runtimeSettings,
     Runtime = {
         Name = executorName,
         Version = executorVersion,
+        Identity = executorIdentity,
         Owner = user,
         Repository = repository,
         Branch = branch
@@ -723,6 +786,115 @@ local function executeSource(content, chunkName)
     return pack(chunk())
 end
 
+local sourceCache = {}
+
+local function loadWebSource(asset)
+    if sourceCache[asset] then
+        return sourceCache[asset]
+    end
+
+    local content
+
+    if usePersistentCache then
+        local file = cacheFilePath(asset, hasFolderFunctions, user, cacheVersion)
+        local canReadCache = true
+
+        if globalMethods.isFile then
+            local checked, exists = pcall(globalMethods.isFile, file)
+            canReadCache = checked and exists
+        end
+
+        if canReadCache then
+            local ran, result = pcall(globalMethods.readFile, file)
+
+            if ran and type(result) == "string" then
+                content = result
+            end
+        end
+
+        if not content then
+            content = httpGet(rawAssetUrl(user, repository, sourceRef, asset))
+            pcall(globalMethods.writeFile, file, content)
+        end
+    else
+        content = httpGet(rawAssetUrl(user, repository, sourceRef, asset))
+    end
+
+    sourceCache[asset] = content
+    return content
+end
+
+local function prefetch(assets)
+    if not web or type(assets) ~= "table" then
+        return true, {}
+    end
+
+    local queue = {}
+    local seen = {}
+
+    for _, asset in ipairs(assets) do
+        if type(asset) == "string"
+            and not asset:find("rbxassetid://", 1, true)
+            and not importCache[asset]
+            and not sourceCache[asset]
+            and not seen[asset]
+        then
+            seen[asset] = true
+            queue[#queue + 1] = asset
+        end
+    end
+
+    if #queue == 0 then
+        return true, {}
+    end
+
+    local errors = {}
+
+    if not (task and task.spawn) then
+        for _, asset in ipairs(queue) do
+            local loaded, loadError = pcall(loadWebSource, asset)
+
+            if not loaded then
+                errors[#errors + 1] = ("%s: %s"):format(asset, tostring(loadError))
+            end
+        end
+
+        return #errors == 0, errors
+    end
+
+    local nextIndex = 0
+    local workerCount = math.min(runtimeSettings.MaxConcurrentImports, #queue)
+    local remainingWorkers = workerCount
+
+    for _ = 1, workerCount do
+        task.spawn(function()
+            while true do
+                nextIndex = nextIndex + 1
+
+                local asset = queue[nextIndex]
+
+                if not asset then
+                    break
+                end
+
+                local loaded, loadError = pcall(loadWebSource, asset)
+
+                if not loaded then
+                    errors[#errors + 1] = ("%s: %s"):format(asset, tostring(loadError))
+                end
+            end
+
+            remainingWorkers = remainingWorkers - 1
+        end)
+    end
+
+    while remainingWorkers > 0 do
+        task.wait()
+    end
+
+    return #errors == 0, errors
+end
+
 function environment.import(asset)
     if importCache[asset] then
         local cached = importCache[asset]
@@ -734,34 +906,9 @@ function environment.import(asset)
     if asset:find("rbxassetid://", 1, true) then
         assets = pack(game:GetObjects(asset)[1])
     elseif web then
-        local content
-
-        if usePersistentCache then
-            local file = cacheFilePath(asset, hasFolderFunctions, user, cacheVersion)
-            local canReadCache = true
-
-            if globalMethods.isFile then
-                local checked, exists = pcall(globalMethods.isFile, file)
-                canReadCache = checked and exists
-            end
-
-            if canReadCache then
-                local ran, result = pcall(globalMethods.readFile, file)
-
-                if ran and type(result) == "string" then
-                    content = result
-                end
-            end
-
-            if not content then
-                content = httpGet(rawAssetUrl(user, repository, sourceRef, asset))
-                pcall(globalMethods.writeFile, file, content)
-            end
-        else
-            content = httpGet(rawAssetUrl(user, repository, sourceRef, asset))
-        end
-
+        local content = loadWebSource(asset)
         assets = executeSource(content, asset .. ".lua")
+        sourceCache[asset] = nil
     else
         assert(globalMethods.readFile, "Local imports require readfile")
         assets = executeSource(globalMethods.readFile("hydroxide/" .. asset .. ".lua"), asset .. ".lua")
@@ -773,6 +920,7 @@ end
 
 useMethods({
     import = environment.import,
+    prefetch = prefetch,
     httpGet = httpGet,
     resolveBranchVersion = resolveBranchVersion
 })

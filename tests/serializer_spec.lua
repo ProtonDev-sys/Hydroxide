@@ -137,5 +137,8 @@ assertEqual(dataToString(fakeBuffer), 'buffer.fromstring("A\\0B")', "buffer seri
 assertEqual(toUnicode(string.char(0xC3, 0xA9)), "utf8.char(233)", "unicode serialization")
 assertEqual(getInstancePath(destroyedInstance), '.Ghost --[[ PARENTED TO NIL OR DESTROYED ]]', "destroyed instance path")
 assertContains(tableToString(cyclic), "OH_CYCLIC_PROTECTION", "cyclic table protection")
+assertEqual(#summarizeValue(string.rep("x", 200), 48) <= 48, true, "string preview is bounded")
+assertContains(summarizeValue({ one = 1, two = 2 }), "2 entries", "table preview avoids full serialization")
+assertEqual(summarizeValue(nil), "nil", "nil preview")
 
 print("serializer_spec.lua: ok")

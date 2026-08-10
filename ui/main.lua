@@ -8,6 +8,41 @@ if oh.Cache["ui/main"] then
 	return Interface
 end
 
+if prefetch then
+	local prefetched, prefetchErrors = prefetch({
+		"ui/controls/TabSelector",
+		"ui/controls/MessageBox",
+		"ui/controls/Prompt",
+		"ui/controls/CheckBox",
+		"ui/controls/Dropdown",
+		"ui/controls/List",
+		"ui/controls/ContextMenu",
+		"ui/controls/TextViewer",
+		"ui/modules/RemoteSpy",
+		"ui/modules/ClosureSpy",
+		"ui/modules/ScriptScanner",
+		"ui/modules/ModuleScanner",
+		"ui/modules/UpvalueScanner",
+		"ui/modules/ConstantScanner",
+		"modules/RemoteSpy",
+		"modules/ClosureSpy",
+		"modules/ScriptScanner",
+		"modules/ModuleScanner",
+		"modules/UpvalueScanner",
+		"modules/ConstantScanner",
+		"objects/Remote",
+		"objects/Closure",
+		"objects/LocalScript",
+		"objects/ModuleScript",
+		"objects/Upvalue",
+		"objects/Constant"
+	})
+
+	if not prefetched and warn then
+		warn("Hydroxide prefetch completed with errors:\n" .. table.concat(prefetchErrors, "\n"))
+	end
+end
+
 import("ui/controls/TabSelector")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 
@@ -28,9 +63,9 @@ xpcall(function()
 end, function(err)
 	local message
 	if err:find("valid member") then
-		message = "The UI has updated, please rejoin and restart. If you get this message more than once, screenshot this message and report it in the Hydroxide server.\n\n" .. err
+		message = "The UI asset changed. Rejoin and restart Hydroxide. If this repeats, report it at https://github.com/ProtonDev-sys/Hydroxide/issues.\n\n" .. err
 	else
-		message = "Report this error in Hydroxide's server:\n\n" .. err
+		message = "Report this error at https://github.com/ProtonDev-sys/Hydroxide/issues:\n\n" .. err
 	end
 
 	MessageBox.Show("An error has occurred", message, MessageType.OK, function()

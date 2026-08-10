@@ -7,13 +7,54 @@ local branch = "potassium-modernization-fork"
 getgenv().HydroxideConfig = {
     owner = owner,
     repository = repository,
-    branch = branch
+    branch = branch,
+    captureExecutorCalls = true,
+    captureCallStacks = true,
+    maxRemoteLogs = 500,
+    maxClosureLogs = 500,
+    maxRenderedLogs = 100,
+    maxStackFrames = 24,
+    maxConcurrentImports = 6
 }
 
 local baseUrl = ("https://raw.githubusercontent.com/%s/%s/%s/"):format(owner, repository, branch)
 
+local function fetch(url)
+    if type(request) == "function" then
+        local ok, response = pcall(request, { Url = url, Method = "GET" })
+
+        if ok and response and type(response.Body) == "string"
+            and (response.Success or (response.StatusCode and response.StatusCode >= 200 and response.StatusCode < 300))
+        then
+            return response.Body
+        end
+    end
+
+    if type(httpget) == "function" then
+        local ok, source = pcall(httpget, url)
+
+        if ok and type(source) == "string" then
+            return source
+        end
+    end
+
+    local ok, source = pcall(function()
+        return game:HttpGet(url)
+    end)
+
+    if ok and type(source) == "string" then
+        return source
+    end
+
+    ok, source = pcall(function()
+        return game:HttpGetAsync(url)
+    end)
+    assert(ok and type(source) == "string", "Hydroxide could not download " .. url)
+    return source
+end
+
 local function webImport(file)
-    local source = httpget(baseUrl .. file .. ".lua")
+    local source = fetch(baseUrl .. file .. ".lua")
     local chunk, compileError = loadstring(source, file .. ".lua")
 
     assert(chunk, compileError)
@@ -30,21 +71,23 @@ This fork targets the current [Potassium API reference](https://docs.potassium.p
 
 * `filtergc` narrows scanner work to non-executor Lua closures instead of walking every GC object.
 * `getrunningscripts` powers Script Scanner without a GC scan.
-* `oth.hook`, `oth.get_root_callback`, `oth.get_original_thread`, and `oth.unhook(target)` are used for direct C-function hooks when available.
+* `hookfunction` keeps direct remote capture on the original thread for caller filtering and stack/source inspection. `oth.hook`, `oth.get_root_callback`, `oth.get_original_thread`, and `oth.unhook(target)` provide a documented fallback when that hook path is unavailable.
 * `getscriptfromthread` preserves calling-script attribution for off-thread hooks.
+* `debug.getcallstack` captures bounded call stacks for remote and closure calls when the active hook runs on the original thread.
+* `decompile` powers lazy script, module, and function source inspection without slowing initial UI loading.
 * `restorefunction` and documented `Connection:Enable()` teardown restore hooks and temporarily disabled error connections.
-* `getthreadidentity` and `setthreadidentity` replace legacy thread-context names internally.
+* `getthreadidentity` and `setthreadidentity` capture the launch identity and restore it around privileged inspection work, replacing legacy thread-context names internally.
 
-Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
+Remote and closure histories are bounded, while visible call rows are rendered in a smaller window to keep high-traffic sessions responsive. Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, `captureExecutorCalls = false` to hide RemoteSpy calls unless they are confirmed to come from a game thread, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
+
+Right-click a captured RemoteSpy or ClosureSpy call to inspect its call stack, caller function, calling script, or decompiled source. Click a Module Scanner row to view the module's decompiled source; right-click Script Scanner rows and function entries for source actions.
 
 The loader defaults to `ProtonDev-sys/Hydroxide` on `potassium-modernization-fork`. Override `owner`, `repository`, or `branch` in `HydroxideConfig` when testing another fork or commit.
 
 # Hydroxide
 <i>Lua runtime introspection and network capturing tool for games on the Roblox engine.</i>
 
-~~Report issues to our Discord server: https://discord.gg/DJxBwAX~~
-
-<ins>New Discord server will be established when the next major release is ready for use</ins>
+Report issues in [ProtonDev-sys/Hydroxide](https://github.com/ProtonDev-sys/Hydroxide/issues).
 
 <p align="center">
     <img src="https://cdn.discordapp.com/attachments/633472429917995038/722143730500501534/Hydroxide_Logo.png"/>
@@ -64,10 +107,10 @@ The loader defaults to `ProtonDev-sys/Hydroxide` on `potassium-modernization-for
     * View general information of scripts (source, protos, constants, etc.)
     * Retrieve protos from running LocalScripts
 * Module Scanner
-    * View general information of modules (return value, source, protos, constants, etc.)
-    * Retrieve protos from loaded ModuleScripts
+    * Browse loaded ModuleScripts and view their complete decompiled source
 * RemoteSpy
     * Log calls of remote objects (RemoteEvent, UnreliableRemoteEvent, RemoteFunction, BindableEvent, BindableFunction)
+    * Inspect call stacks, calling functions, calling scripts, and decompiled source when supported
     * Ignore/Block calls based on parameters passed
     * Traceback calling function/closure
 * ClosureSpy
