@@ -41,7 +41,8 @@ local runtimeSettings = {
     MaxGeneratedTableDepth = numberSetting("maxGeneratedTableDepth", 16, 1, 64),
     MaxGeneratedStringBytes = numberSetting("maxGeneratedStringBytes", 65536, 256, 1048576),
     MaxGeneratedBufferBytes = numberSetting("maxGeneratedBufferBytes", 65536, 256, 1048576),
-    MaxGeneratedOutputBytes = numberSetting("maxGeneratedOutputBytes", 1048576, 16384, 8388608)
+    MaxGeneratedOutputBytes = numberSetting("maxGeneratedOutputBytes", 1048576, 16384, 8388608),
+    MaxInspectorBytes = numberSetting("maxInspectorBytes", 524288, 8192, 8388608)
 }
 
 local function pick(...)

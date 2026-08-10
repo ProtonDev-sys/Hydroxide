@@ -21,6 +21,7 @@ getgenv().HydroxideConfig = {
     maxGeneratedStringBytes = 65536,
     maxGeneratedBufferBytes = 65536,
     maxGeneratedOutputBytes = 1048576,
+    maxInspectorBytes = 524288,
     maxConcurrentImports = 6
 }
 
