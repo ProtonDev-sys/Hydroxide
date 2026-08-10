@@ -42,12 +42,19 @@ local diagnostics = {
     CaptureErrors = 0,
     CallsCaptured = 0,
     CallsDeduplicated = 0,
+    CallsForwarded = 0,
+    CallsBlocked = 0,
+    ForwardErrors = 0,
     CallsSkippedUnknownCaller = 0,
     ExecutorCallsSkipped = 0,
     LogsDropped = 0,
     DirectHookAttempts = 0,
     DirectHooksInstalled = 0,
     DirectHookFailures = 0,
+    OthHookAttempts = 0,
+    OthHookFailures = 0,
+    FunctionHookAttempts = 0,
+    FunctionHookFailures = 0,
     NamecallHookInstalled = false,
     NamecallHookFailure = nil,
     LastCaptureError = nil,
@@ -187,6 +194,43 @@ local function frameSource(frame)
     return frame.source or frame.Source or frame.short_src or frame.shortSource
 end
 
+local function frameLine(frame)
+    if type(frame) ~= "table" then
+        return nil
+    end
+
+    local line = tonumber(frame.currentline or frame.currentLine or frame.line or frame.Line or frame.linedefined)
+
+    if not line or line < 0 then
+        return nil
+    end
+
+    return math.floor(line)
+end
+
+local function normalizeSource(source)
+    if type(source) ~= "string" then
+        return nil
+    end
+
+    source = source:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^[@=]", "")
+    return source ~= "" and source or nil
+end
+
+local function derivedFrameName(source)
+    if type(source) ~= "string" then
+        return nil
+    end
+
+    local name = source:gsub("\\", "/"):match("([^/]+)$")
+
+    if name then
+        name = name:gsub("%.lua$", ""):match("([^%.]+)$") or name
+    end
+
+    return name ~= "" and name or nil
+end
+
 local function isInternalFrame(frame)
     if type(frame) ~= "table" then
         return false
@@ -198,7 +242,7 @@ local function isInternalFrame(frame)
         return true
     end
 
-    local source = frameSource(frame)
+    local source = normalizeSource(frameSource(frame))
 
     if type(source) == "string"
         and (source:find("modules/RemoteSpy.lua", 1, true) or source:find("modules\\RemoteSpy.lua", 1, true))
@@ -206,7 +250,44 @@ local function isInternalFrame(frame)
         return true
     end
 
-    return source == "[C]" or frame.what == "C"
+    local what = frame.what or frame.What
+    return source == "[C]" or what == "C"
+end
+
+local function normalizeStackFrame(frame, index)
+    if type(frame) == "string" then
+        return {
+            index = index,
+            text = frame,
+            name = "trace",
+            source = frame
+        }
+    elseif type(frame) ~= "table" then
+        return {
+            index = index,
+            value = frame,
+            name = "unknown"
+        }
+    end
+
+    local source = normalizeSource(frameSource(frame))
+    local shortSource = normalizeSource(frame.short_src or frame.shortSource)
+    local name = frame.name or frame.Name
+
+    if type(name) ~= "string" or name == "" or name == "<anonymous>" then
+        name = derivedFrameName(shortSource or source) or "anonymous"
+    end
+
+    return {
+        index = index,
+        func = frameFunction(frame),
+        name = name,
+        source = source,
+        shortSource = shortSource,
+        line = frameLine(frame),
+        what = frame.what or frame.What,
+        script = frame.script or frame.Script
+    }
 end
 
 local function safeGetInfo()
@@ -222,7 +303,7 @@ local function safeGetInfo()
         end
 
         if ran and type(info) == "table" and not isInternalFrame(info) then
-            return info
+            return normalizeStackFrame(info, stackLevel)
         end
     end
 
@@ -234,7 +315,7 @@ local function filterCallStack(stack)
 
     if type(stack) == "string" then
         for line in stack:gmatch("[^\r\n]+") do
-            frames[#frames + 1] = line
+            frames[#frames + 1] = normalizeStackFrame(line, #frames + 1)
 
             if #frames >= maxStackFrames then
                 break
@@ -247,7 +328,7 @@ local function filterCallStack(stack)
             local frame = source[index]
 
             if not isInternalFrame(frame) then
-                frames[#frames + 1] = frame
+                frames[#frames + 1] = normalizeStackFrame(frame, index)
             end
 
             if #frames >= maxStackFrames then
@@ -305,10 +386,10 @@ local function buildCall(vargs, capture)
         caller = {
             script = script,
             func = frameFunction(info),
-            name = info and (info.name or info.Name),
-            source = frameSource(info),
-            shortSource = info and (info.short_src or info.shortSource),
-            line = info and (info.currentline or info.line or info.Line),
+            name = info and info.name,
+            source = info and info.source,
+            shortSource = info and info.shortSource,
+            line = info and info.line,
             isExecutor = capture.IsExecutor,
             captureSource = capture.Source,
             offThread = capture.OffThread,
@@ -319,14 +400,14 @@ end
 
 local function processRemoteCall(instance, method, vargs, capture)
     if typeof(instance) ~= "Instance" then
-        return false
+        return false, nil
     end
 
     method = normalizeMethod(method)
     capture.Method = method
 
     if not remotesViewing[instance.ClassName] or instance == remoteDataEvent or not remoteMethods[method] then
-        return false
+        return false, nil
     end
 
     if not captureExecutorCalls and capture.IsExecutor ~= false then
@@ -336,15 +417,17 @@ local function processRemoteCall(instance, method, vargs, capture)
             diagnostics.CallsSkippedUnknownCaller = diagnostics.CallsSkippedUnknownCaller + 1
         end
 
-        return false
+        return false, nil
     end
 
     local remote = ensureRemote(instance)
     local argsIgnored = next(remote.IgnoredArgs) ~= nil and remote:AreArgsIgnored(vargs)
     local argsBlocked = next(remote.BlockedArgs) ~= nil and remote:AreArgsBlocked(vargs)
 
+    local call
+
     if not remote.Ignored and not argsIgnored then
-        local call = buildCall(vargs, capture)
+        call = buildCall(vargs, capture)
 
         local dropped = remote:IncrementCalls(call)
 
@@ -354,23 +437,49 @@ local function processRemoteCall(instance, method, vargs, capture)
             diagnostics.LogsDropped = diagnostics.LogsDropped + 1
         end
 
-        if eventSet then
-            remoteDataEvent:Fire(instance, call)
-        end
     end
 
-    return remote.Blocked or argsBlocked
+    return remote.Blocked or argsBlocked, call
 end
 
 local function safeProcessRemoteCall(instance, method, vargs, capture)
-    local ran, blocked = pcall(processRemoteCall, instance, method, vargs, capture)
+    local ran, blocked, call = pcall(processRemoteCall, instance, method, vargs, capture)
 
     if not ran then
         recordCaptureError(capture.Source, blocked)
-        return false
+        return false, nil
     end
 
-    return blocked == true
+    return blocked == true, call
+end
+
+local function emitCall(instance, call)
+    if call and eventSet then
+        local ran, err = pcall(remoteDataEvent.Fire, remoteDataEvent, instance, call)
+
+        if not ran then
+            recordCaptureError("call-event", err)
+        end
+    end
+end
+
+local function elapsedMilliseconds(started)
+    if not started or not os or type(os.clock) ~= "function" then
+        return nil
+    end
+
+    local ran, finished = pcall(os.clock)
+    return ran and math.max(0, (finished - started) * 1000) or nil
+end
+
+local function tailResults(results)
+    local values = { n = math.max(0, results.n - 1) }
+
+    for index = 2, results.n do
+        values[index - 1] = results[index]
+    end
+
+    return values
 end
 
 local activeCalls = setmetatable({}, { __mode = "k" })
@@ -442,21 +551,49 @@ local function runHook(original, method, capture, arguments)
 
     local previous, duplicate = beginCapture(capture.Context, instance, method, capture.Source)
     local blocked = false
+    local call
 
     if duplicate then
         diagnostics.CallsDeduplicated = diagnostics.CallsDeduplicated + 1
     else
-        blocked = safeProcessRemoteCall(instance, method, tailArguments(arguments), capture)
+        blocked, call = safeProcessRemoteCall(instance, method, tailArguments(arguments), capture)
     end
 
     if blocked then
         endCapture(capture.Context, instance, method, previous)
+
+        if call then
+            call.blocked = true
+            call.completed = true
+            call.forwarded = false
+            diagnostics.CallsBlocked = diagnostics.CallsBlocked + 1
+            emitCall(instance, call)
+        end
+
         return
     end
 
+    local started = os and type(os.clock) == "function" and os.clock() or nil
     local results = packValues(pcall(invokeOriginal, original, arguments))
 
     endCapture(capture.Context, instance, method, previous)
+
+    if call then
+        call.blocked = false
+        call.completed = true
+        call.durationMs = elapsedMilliseconds(started)
+        call.forwarded = results[1] == true
+
+        if results[1] then
+            call.returns = tailResults(results)
+            diagnostics.CallsForwarded = diagnostics.CallsForwarded + 1
+        else
+            call.error = tostring(results[2])
+            diagnostics.ForwardErrors = diagnostics.ForwardErrors + 1
+        end
+
+        emitCall(instance, call)
+    end
 
     if not results[1] then
         error(results[2], 0)
@@ -490,8 +627,10 @@ end
 
 local function installDirectHook(target, targetMethod)
     diagnostics.DirectHookAttempts = diagnostics.DirectHookAttempts + 1
+    local lastFailure
 
     if hookFunction then
+        diagnostics.FunctionHookAttempts = diagnostics.FunctionHookAttempts + 1
         local original
         local callback = createDirectHookCallback(targetMethod, false)
         local callbackWrapper = function(...)
@@ -514,11 +653,14 @@ local function installDirectHook(target, targetMethod)
             return true
         end
 
-        diagnostics.DirectHookFailures = diagnostics.DirectHookFailures + 1
-        recordHookFailure("hookfunction", ran and "hookFunction did not return the original closure" or result)
+        diagnostics.FunctionHookFailures = diagnostics.FunctionHookFailures + 1
+        lastFailure = ran and "hookFunction did not return the original closure" or result
     end
 
+    -- OTH hooks run off-thread, so caller stacks and executor filtering are
+    -- limited. Use them only when the standard original-thread hook path fails.
     if othHook and othGetRootCallback and othUnhook then
+        diagnostics.OthHookAttempts = diagnostics.OthHookAttempts + 1
         local callback = createDirectHookCallback(targetMethod, true)
         local othCallback = registerInternal(function(...)
             local rootRan, original = pcall(othGetRootCallback)
@@ -542,10 +684,12 @@ local function installDirectHook(target, targetMethod)
             return true
         end
 
-        diagnostics.DirectHookFailures = diagnostics.DirectHookFailures + 1
-        recordHookFailure("oth", ran and "othHook returned false" or result)
+        diagnostics.OthHookFailures = diagnostics.OthHookFailures + 1
+        lastFailure = ran and "othHook returned false" or result
     end
 
+    diagnostics.DirectHookFailures = diagnostics.DirectHookFailures + 1
+    recordHookFailure("direct-hook", lastFailure or "No supported direct-hook API was available")
     return false
 end
 
@@ -569,9 +713,11 @@ end
 
 registerInternal(safeGetInfo)
 registerInternal(safeGetCallStack)
+registerInternal(normalizeStackFrame)
 registerInternal(buildCall)
 registerInternal(processRemoteCall)
 registerInternal(safeProcessRemoteCall)
+registerInternal(emitCall)
 registerInternal(runHook)
 
 local directTargets = {

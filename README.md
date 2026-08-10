@@ -14,6 +14,9 @@ getgenv().HydroxideConfig = {
     maxClosureLogs = 500,
     maxRenderedLogs = 100,
     maxStackFrames = 24,
+    maxGeneratedTableEntries = 256,
+    maxGeneratedTables = 512,
+    maxGeneratedTableDepth = 16,
     maxConcurrentImports = 6
 }
 
@@ -78,9 +81,9 @@ This fork targets the current [Potassium API reference](https://docs.potassium.p
 * `restorefunction` and documented `Connection:Enable()` teardown restore hooks and temporarily disabled error connections.
 * `getthreadidentity` and `setthreadidentity` capture the launch identity and restore it around privileged inspection work, replacing legacy thread-context names internally.
 
-Remote and closure histories are bounded, while visible call rows are rendered in a smaller window to keep high-traffic sessions responsive. Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, `captureExecutorCalls = false` to hide RemoteSpy calls unless they are confirmed to come from a game thread, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
+Remote and closure histories are bounded, while visible call rows are rendered in a smaller window to keep high-traffic sessions responsive. Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. The main Hydroxide window is wider, and RemoteSpy/ClosureSpy call logs now expose a built-in inspector action strip for replay scripts, stacks, caller functions, calling scripts, script paths, repeat calls, and hex string previews. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, `captureExecutorCalls = false` to hide RemoteSpy calls unless they are confirmed to come from a game thread, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
 
-Right-click a captured RemoteSpy or ClosureSpy call to inspect its call stack, caller function, calling script, or decompiled source. Click a Module Scanner row to view the module's decompiled source; right-click Script Scanner rows and function entries for source actions.
+Click a captured RemoteSpy or ClosureSpy call to enable the inspector actions; right-click still opens the same actions as a fallback. RemoteSpy replay generation opens an editable script viewer and copies the generated script, preserving nil argument slots and shared or cyclic table references where possible. Large generated tables are capped by `maxGeneratedTableEntries`, `maxGeneratedTables`, and `maxGeneratedTableDepth` to avoid UI stalls. Click a Module Scanner row to view the module's decompiled source; right-click Script Scanner rows and function entries for source actions.
 
 The loader defaults to `ProtonDev-sys/Hydroxide` on `potassium-modernization-fork`. Override `owner`, `repository`, or `branch` in `HydroxideConfig` when testing another fork or commit.
 
@@ -110,12 +113,14 @@ Report issues in [ProtonDev-sys/Hydroxide](https://github.com/ProtonDev-sys/Hydr
     * Browse loaded ModuleScripts and view their complete decompiled source
 * RemoteSpy
     * Log calls of remote objects (RemoteEvent, UnreliableRemoteEvent, RemoteFunction, BindableEvent, BindableFunction)
-    * Inspect call stacks, calling functions, calling scripts, and decompiled source when supported
+    * Inspect call stacks, calling functions, calling scripts, decompiled source, replay state, and return/error status when supported
+    * Generate editable replay scripts with nil argument, Instance path, shared table, and cyclic table handling
     * Ignore/Block calls based on parameters passed
     * Traceback calling function/closure
 * ClosureSpy
     * Log calls of closures
     * View general information of closures (location, protos, constants, etc.)
+    * Inspect call chains, caller source, calling scripts, and nested caller functions from the logs pane
 
 More to come, soon.
 

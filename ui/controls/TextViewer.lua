@@ -198,7 +198,7 @@ local function ensureViewer()
 
 	trackConnection(copy.MouseButton1Click:Connect(function()
 		if setClipboard then
-			setClipboard(viewer.Text)
+			setClipboard(viewer.TextBox.Text)
 		end
 	end))
 
@@ -207,13 +207,15 @@ local function ensureViewer()
 	return viewer
 end
 
-function TextViewer.Show(title, text)
+function TextViewer.Show(title, text, options)
 	local current = ensureViewer()
 	text = tostring(text or "")
+	options = type(options) == "table" and options or {}
 
 	current.Text = text
 	current.Title.Text = tostring(title or "Text Viewer")
 	current.TextBox.Text = text
+	current.TextBox.TextEditable = options.Editable == true
 	current.Scroller.CanvasPosition = Vector2.new()
 
 	local size = estimateTextSize(text, current.TextBox.TextSize, current.TextBox.Font)

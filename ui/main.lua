@@ -18,6 +18,7 @@ if prefetch then
 		"ui/controls/List",
 		"ui/controls/ContextMenu",
 		"ui/controls/TextViewer",
+		"ui/controls/ActionPanel",
 		"ui/modules/RemoteSpy",
 		"ui/modules/ClosureSpy",
 		"ui/modules/ScriptScanner",
@@ -35,7 +36,8 @@ if prefetch then
 		"objects/LocalScript",
 		"objects/ModuleScript",
 		"objects/Upvalue",
-		"objects/Constant"
+		"objects/Constant",
+		"methods/scriptbuilder"
 	})
 
 	if not prefetched and warn then
@@ -73,9 +75,12 @@ end, function(err)
 	end)
 end)
 
+local baseWidth = 760
+local baseHeight = 430
+
 local constants = {
-	opened = UDim2.new(0.5, -325, 0.5, -175),
-	closed = UDim2.new(0.5, -325, 0, -400),
+	opened = UDim2.new(0.5, -baseWidth / 2, 0.5, -baseHeight / 2),
+	closed = UDim2.new(0.5, -baseWidth / 2, 0, -(baseHeight + 50)),
 	reveal = UDim2.new(0.5, -15, 0, 20),
 	conceal = UDim2.new(0.5, -15, 0, -75)
 }
@@ -85,6 +90,9 @@ local Base = Interface.Base
 local Drag = Base.Drag
 local Status = Base.Status
 local Collapse = Drag.Collapse
+
+Base.Size = UDim2.new(0, baseWidth, 0, baseHeight)
+Base.Position = constants.closed
 
 function oh.setStatus(text)
 	Status.Text = '• Status: ' .. text

@@ -928,6 +928,7 @@ useMethods({
 useMethods(import("methods/string"))
 useMethods(import("methods/table"))
 useMethods(import("methods/userdata"))
+useMethods(import("methods/scriptbuilder"))
 useMethods(import("methods/environment"))
 
 --import("ui/main")

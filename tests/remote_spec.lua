@@ -233,8 +233,11 @@ do
     assertEqual(eventModel.Logs[1].args[3], "third", "captured argument after nil retained")
     assertEqual(eventModel.Logs[1].func, externalCaller, "first external stack frame selected as caller")
     assertEqual(eventModel.Logs[1].caller.name, "ExternalCaller", "external caller name retained")
-    assertEqual(eventModel.Logs[1].caller.source, "@game/ExternalCaller.lua", "external caller source retained")
+    assertEqual(eventModel.Logs[1].caller.source, "game/ExternalCaller.lua", "external caller source retained")
     assertEqual(eventModel.Logs[1].caller.line, 42, "external caller line retained")
+    assertEqual(eventModel.Logs[1].completed, true, "forwarded call is marked complete")
+    assertEqual(eventModel.Logs[1].forwarded, true, "forwarded call is marked forwarded")
+    assertEqual(eventModel.Logs[1].returns[1], "remote-event-result", "forwarded return value retained")
     assertEqual(#eventModel.Logs[1].stack, 1, "internal RemoteSpy stack frames filtered")
     assertEqual(RemoteSpy.Diagnostics.CallsDeduplicated, 1, "direct/namecall pair deduplicated")
 
@@ -277,7 +280,10 @@ do
     eventModel:SetBlocked(true)
     local callsBeforeBlock = originalCalls
     directWrappers[classMethods.RemoteEvent.FireServer](event, "blocked")
+    local blockedCall = eventModel.Logs[#eventModel.Logs]
     assertEqual(originalCalls, callsBeforeBlock, "blocked call does not reach original")
+    assertEqual(blockedCall.blocked, true, "blocked call is marked blocked")
+    assertEqual(blockedCall.forwarded, false, "blocked call is not marked forwarded")
 
     eventModel:SetBlocked(false)
     directWrappers[classMethods.RemoteEvent.FireServer](event, "retained")

@@ -101,6 +101,15 @@ for name, method in pairs(userdataMethods) do
     _G[name] = method
 end
 
+_G.oh = {
+    Settings = {}
+}
+
+local scriptBuilderMethods = dofile(root .. "methods/scriptbuilder.lua")
+for name, method in pairs(scriptBuilderMethods) do
+    _G[name] = method
+end
+
 local numberRange = makeObject({
     __type = "NumberRange",
     Min = 1,
@@ -126,6 +135,17 @@ local fakeBuffer = makeObject({
 
 local cyclic = {}
 cyclic.self = cyclic
+local nested = {
+    first = cyclic,
+    alsoFirst = cyclic
+}
+
+local remoteEvent = makeObject({
+    __type = "Instance",
+    Name = "Probe Remote",
+    ClassName = "RemoteEvent",
+    Parent = workspaceObject
+}, "Probe Remote")
 
 assertEqual(userdataValue(numberRange), "NumberRange.new(1, 25)", "NumberRange serialization")
 assertEqual(
@@ -140,5 +160,23 @@ assertContains(tableToString(cyclic), "OH_CYCLIC_PROTECTION", "cyclic table prot
 assertEqual(#summarizeValue(string.rep("x", 200), 48) <= 48, true, "string preview is bounded")
 assertContains(summarizeValue({ one = 1, two = 2 }), "2 entries", "table preview avoids full serialization")
 assertEqual(summarizeValue(nil), "nil", "nil preview")
+
+local generatedRemoteScript = buildRemoteScript(remoteEvent, "FireServer", {
+    "alpha",
+    nil,
+    nested,
+    n = 3
+}, {
+    method = "FireServer",
+    timestamp = 123.5,
+    script = remoteEvent
+})
+
+assertContains(generatedRemoteScript, 'local OH_Remote = game:GetService("Workspace")["Probe Remote"]', "remote path emitted")
+assertContains(generatedRemoteScript, "OH_Args.n = 3", "nil argument count preserved")
+assertContains(generatedRemoteScript, "OH_Args[2] = nil", "nil argument emitted")
+assertContains(generatedRemoteScript, 'OH_Table_2["self"] = OH_Table_2', "cyclic table rebuilt")
+assertContains(generatedRemoteScript, 'OH_Table_1["first"] = OH_Table_2', "shared table reference rebuilt")
+assertContains(generatedRemoteScript, "return OH_Remote:FireServer(OH_Unpack(OH_Args, 1, OH_Args.n))", "remote replay call emitted")
 
 print("serializer_spec.lua: ok")

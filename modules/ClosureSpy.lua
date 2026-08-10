@@ -20,6 +20,13 @@ local pack = table.pack or function(...)
     return { n = select("#", ...), ... }
 end
 local unpackValues = table.unpack or unpack
+local diagnostics = {
+    CaptureErrors = 0,
+    CallsCaptured = 0,
+    CallsForwarded = 0,
+    CallsBlocked = 0,
+    ForwardErrors = 0
+}
 
 if Instance and type(Instance.new) == "function" then
     local created, result = pcall(Instance.new, "BindableEvent")
@@ -110,7 +117,36 @@ local function frameLine(frame)
         return nil
     end
 
-    return frame.currentline or frame.currentLine or frame.line or frame.Line or frame.linedefined
+    local line = tonumber(frame.currentline or frame.currentLine or frame.line or frame.Line or frame.linedefined)
+
+    if not line or line < 0 then
+        return nil
+    end
+
+    return math.floor(line)
+end
+
+local function normalizeSource(source)
+    if type(source) ~= "string" then
+        return nil
+    end
+
+    source = source:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^[@=]", "")
+    return source ~= "" and source or nil
+end
+
+local function derivedFrameName(source)
+    if type(source) ~= "string" then
+        return nil
+    end
+
+    local name = source:gsub("\\", "/"):match("([^/]+)$")
+
+    if name then
+        name = name:gsub("%.lua$", ""):match("([^%.]+)$") or name
+    end
+
+    return name ~= "" and name or nil
 end
 
 local function isInternalFrame(frame)
@@ -124,7 +160,7 @@ local function isInternalFrame(frame)
         return true
     end
 
-    local source = frameSource(frame)
+    local source = normalizeSource(frameSource(frame))
 
     if type(source) == "string"
         and (source:find("modules/ClosureSpy.lua", 1, true) or source:find("modules\\ClosureSpy.lua", 1, true))
@@ -132,8 +168,11 @@ local function isInternalFrame(frame)
         return true
     end
 
-    return source == "[C]" or frame.what == "C"
+    local what = frame.what or frame.What
+    return source == "[C]" or what == "C"
 end
+
+local normalizeStackFrame
 
 local function safeExternalInfo()
     if not getInfo then
@@ -148,7 +187,7 @@ local function safeExternalInfo()
         end
 
         if type(info) == "table" and not isInternalFrame(info) then
-            return info
+            return normalizeStackFrame(info, stackLevel)
         end
     end
 
@@ -164,25 +203,45 @@ local function safeScriptPath(script)
     return ran and result or nil
 end
 
-local function normalizeStackFrame(frame, index)
+normalizeStackFrame = function(frame, index)
     if type(frame) == "function" then
         local info = safeInfo(frame, "nSl")
+        local source = info and normalizeSource(info.source or info.short_src) or nil
 
         return {
             index = index,
             func = frame,
-            name = info and info.name or nil,
-            source = info and info.source or nil,
-            line = info and (info.currentline or info.currentLine or info.linedefined) or nil
+            name = (info and info.name) or derivedFrameName(source) or "anonymous",
+            source = source,
+            shortSource = info and normalizeSource(info.short_src) or nil,
+            line = info and frameLine(info) or nil,
+            what = info and info.what or nil
         }
     elseif type(frame) == "table" then
+        local source = normalizeSource(frameSource(frame))
+        local shortSource = normalizeSource(frame.short_src or frame.shortSource)
+        local name = frame.name or frame.Name
+
+        if type(name) ~= "string" or name == "" or name == "<anonymous>" then
+            name = derivedFrameName(shortSource or source) or "anonymous"
+        end
+
         return {
             index = index,
             func = frameFunction(frame) or frame.functionValue,
-            name = frame.name or frame.Name,
-            source = frameSource(frame),
-            shortSource = frame.short_src or frame.shortSource,
-            line = frameLine(frame)
+            name = name,
+            source = source,
+            shortSource = shortSource,
+            line = frameLine(frame),
+            what = frame.what or frame.What,
+            script = frame.script or frame.Script
+        }
+    elseif type(frame) == "string" then
+        return {
+            index = index,
+            text = frame,
+            name = "trace",
+            source = normalizeSource(frame)
         }
     end
 
@@ -236,6 +295,37 @@ local function captureCallStack()
     end
 
     return captured
+end
+
+local function captureTimestamp()
+    if DateTime and type(DateTime.now) == "function" then
+        local ran, now = pcall(DateTime.now)
+
+        if ran and now and type(now.UnixTimestampMillis) == "number" then
+            return now.UnixTimestampMillis / 1000
+        end
+    end
+
+    return os and type(os.time) == "function" and os.time() or nil
+end
+
+local function elapsedMilliseconds(started)
+    if not started or not os or type(os.clock) ~= "function" then
+        return nil
+    end
+
+    local ran, finished = pcall(os.clock)
+    return ran and math.max(0, (finished - started) * 1000) or nil
+end
+
+local function tailResults(results)
+    local values = { n = math.max(0, results.n - 1) }
+
+    for index = 2, results.n do
+        values[index - 1] = results[index]
+    end
+
+    return values
 end
 
 local function copyActiveCallChain(chain)
@@ -321,6 +411,7 @@ for _, callback in ipairs({
     safeScriptPath,
     normalizeStackFrame,
     captureCallStack,
+    captureTimestamp,
     copyActiveCallChain,
     buildCallerInfo,
     pushActiveCall,
@@ -406,37 +497,86 @@ function Hook.new(closure)
     local original
     local wrapper = newCClosure(function(...)
         local vargs = pack(...)
-        local callerInfo = buildCallerInfo(target)
-        local activeEntry = pushActiveCall(hook, callerInfo)
-        local call = {
-            script = callerInfo.script,
-            func = callerInfo.func,
-            caller = callerInfo,
-            stack = callerInfo.stack,
-            chain = copyActiveCallChain(activeEntry.chain),
-            timestamp = os and os.clock and os.clock() or nil,
-            args = vargs
-        }
+        local activeEntry
+        local call
+        local captured, captureError = pcall(function()
+            local callerInfo = buildCallerInfo(target)
+            activeEntry = pushActiveCall(hook, callerInfo)
 
-        if shouldCaptureCall(hook, vargs) then
-            hook:IncrementCalls(call)
+            if shouldCaptureCall(hook, vargs) then
+                call = {
+                    script = callerInfo.script,
+                    func = callerInfo.func,
+                    caller = callerInfo,
+                    stack = callerInfo.stack,
+                    chain = copyActiveCallChain(activeEntry.chain),
+                    timestamp = captureTimestamp(),
+                    method = "closure",
+                    args = vargs
+                }
+                hook:IncrementCalls(call)
+                diagnostics.CallsCaptured = diagnostics.CallsCaptured + 1
+            end
+        end)
+
+        if not captured then
+            diagnostics.CaptureErrors = diagnostics.CaptureErrors + 1
+
+            if type(warn) == "function" then
+                warn("[Hydroxide] ClosureSpy capture failed: " .. tostring(captureError))
+            end
+        end
+
+        local blockChecked, blocked = pcall(function()
+            return hook.Blocked
+                or (next(hook.BlockedArgs) ~= nil and hook:AreArgsBlocked(vargs))
+        end)
+
+        if not blockChecked then
+            diagnostics.CaptureErrors = diagnostics.CaptureErrors + 1
+            blocked = false
+        end
+
+        if blocked then
+            popActiveCall(activeEntry)
+
+            if call then
+                call.blocked = true
+                call.completed = true
+                call.forwarded = false
+                diagnostics.CallsBlocked = diagnostics.CallsBlocked + 1
+                emitCall(hook, call)
+            end
+
+            return
+        end
+
+        local started = os and type(os.clock) == "function" and os.clock() or nil
+        local results = pack(pcall(original, ...))
+        popActiveCall(activeEntry)
+
+        if call then
+            call.blocked = false
+            call.completed = true
+            call.durationMs = elapsedMilliseconds(started)
+            call.forwarded = results[1] == true
+
+            if results[1] then
+                call.returns = tailResults(results)
+                diagnostics.CallsForwarded = diagnostics.CallsForwarded + 1
+            else
+                call.error = tostring(results[2])
+                diagnostics.ForwardErrors = diagnostics.ForwardErrors + 1
+            end
+
             emitCall(hook, call)
         end
 
-        if not hook.Blocked
-            and (next(hook.BlockedArgs) == nil or not hook:AreArgsBlocked(vargs))
-        then
-            local results = pack(pcall(original, ...))
-            popActiveCall(activeEntry)
-
-            if not results[1] then
-                error(results[2], 0)
-            end
-
-            return unpackValues(results, 2, results.n)
+        if not results[1] then
+            error(results[2], 0)
         end
 
-        popActiveCall(activeEntry)
+        return unpackValues(results, 2, results.n)
     end)
     local ran, result = pcall(hookFunction, target, wrapper)
 
@@ -569,4 +709,5 @@ ClosureSpy.CurrentClosures = hookMap
 ClosureSpy.GetActiveCallChain = getActiveCallChain
 ClosureSpy.SetEvent = setEvent
 ClosureSpy.RequiredMethods = requiredMethods
+ClosureSpy.Diagnostics = diagnostics
 return ClosureSpy

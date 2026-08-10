@@ -28,6 +28,7 @@ local Dropdown = import("ui/controls/Dropdown")
 local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local TextViewer = import("ui/controls/TextViewer")
+local ActionPanel = import("ui/controls/ActionPanel")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
 local TabSelector = import("ui/controls/TabSelector")
 
@@ -78,6 +79,15 @@ local icons = {
 	RemoteFunction = "rbxassetid://4229810474",
 	BindableEvent = "rbxassetid://4229809371",
 	BindableFunction = "rbxassetid://4229807624",
+	copy = "rbxassetid://4891705738",
+	arguments = "rbxassetid://4666594276",
+	results = "rbxassetid://4666593882",
+	hex = "rbxassetid://9058292613",
+	repeatCall = "rbxassetid://4907151581",
+	script = "rbxassetid://4800244808",
+	source = "rbxassetid://4891705738",
+	spy = "rbxassetid://4666593447",
+	stack = "rbxassetid://5179169654",
 }
 
 local constants = {
@@ -110,6 +120,7 @@ local selected = {
 	logs = {},
 	conditions = {},
 }
+local updateCallInspector
 
 local pathContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Remote Path")
 local conditionContext = ContextMenuButton.new("rbxassetid://4891633802", "Call Conditions")
@@ -118,14 +129,17 @@ local ignoreContext = ContextMenuButton.new("rbxassetid://4842578510", "Ignore C
 local blockContext = ContextMenuButton.new("rbxassetid://4891641806", "Block Calls")
 local removeContext = ContextMenuButton.new("rbxassetid://4702831188", "Remove Log")
 
-local scriptContext = ContextMenuButton.new("rbxassetid://4800244808", "Generate Script")
-local callStackContext = ContextMenuButton.new("rbxassetid://4800244808", "View Call Stack")
-local inspectFunctionContext = ContextMenuButton.new("rbxassetid://4666593447", "Inspect Calling Function")
-local inspectScriptContext = ContextMenuButton.new("rbxassetid://4800244808", "Inspect Calling Script")
-local callingScriptContext = ContextMenuButton.new("rbxassetid://4800244808", "Get Calling Script")
-local spyClosureContext = ContextMenuButton.new("rbxassetid://4666593447", "Spy Calling Function")
-local repeatCallContext = ContextMenuButton.new("rbxassetid://4907151581", "Repeat Call")
-local viewAsHexContext = ContextMenuButton.new("rbxassetid://9058292613", "Toggle String Hex View")
+local scriptContext = ContextMenuButton.new(icons.script, "View Replay Code")
+local copyScriptContext = ContextMenuButton.new(icons.copy, "Copy Replay Code")
+local argumentsContext = ContextMenuButton.new(icons.arguments, "View Arguments")
+local returnsContext = ContextMenuButton.new(icons.results, "View Returns")
+local callStackContext = ContextMenuButton.new(icons.stack, "View Call Stack")
+local inspectFunctionContext = ContextMenuButton.new(icons.spy, "Inspect Calling Function")
+local inspectScriptContext = ContextMenuButton.new(icons.source, "Inspect Calling Script")
+local callingScriptContext = ContextMenuButton.new(icons.copy, "Copy Calling Script Path")
+local spyClosureContext = ContextMenuButton.new(icons.spy, "Spy Calling Function")
+local repeatCallContext = ContextMenuButton.new(icons.repeatCall, "Replay Call")
+local viewAsHexContext = ContextMenuButton.new(icons.hex, "Toggle String Hex View")
 
 local removeConditionContext = ContextMenuButton.new("rbxassetid://4702831188", "Remove Condition")
 
@@ -152,6 +166,9 @@ local remoteListMenuSelected = ContextMenu.new({
 })
 local remoteLogsMenu = ContextMenu.new({
 	scriptContext,
+	copyScriptContext,
+	argumentsContext,
+	returnsContext,
 	callStackContext,
 	inspectFunctionContext,
 	inspectScriptContext,
@@ -201,6 +218,10 @@ local function clearSelectedCall(button)
 	selected.func = nil
 	selected.callInfo = nil
 	selected.callPodButton = nil
+
+	if updateCallInspector then
+		updateCallInspector()
+	end
 end
 
 local function selectedCallAlive()
@@ -305,17 +326,60 @@ local function argumentSummary(value)
 	return truncate(tostring(value), 140)
 end
 
-local function safeDataToString(value)
-	local ran, result = pcall(dataToString, value)
-	return ran and result or argumentSummary(value)
-end
-
 local function formatTimestamp(timestamp)
 	if type(timestamp) ~= "number" then
 		return "unknown"
 	end
 
-	return tostring(timestamp)
+	local seconds = math.floor(timestamp)
+	local milliseconds = math.floor((timestamp - seconds) * 1000 + 0.5) % 1000
+	local ran, formatted = pcall(os.date, "%Y-%m-%d %H:%M:%S", seconds)
+
+	if ran and type(formatted) == "string" then
+		return ("%s.%03d local"):format(formatted, milliseconds)
+	end
+
+	return ("%.3f"):format(timestamp)
+end
+
+local function safeInstancePath(instance)
+	if typeof(instance) ~= "Instance" then
+		return nil
+	end
+
+	local ran, path = pcall(getInstancePath, instance)
+	return ran and path or nil
+end
+
+local function cleanSource(source)
+	if type(source) ~= "string" then
+		return "unknown"
+	end
+
+	return source:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^[@=]", "")
+end
+
+local function describePackedValues(title, values)
+	local count = getArgCount(values)
+	local lines = {
+		title,
+		("Count: %d"):format(count),
+		"",
+	}
+
+	if count == 0 then
+		lines[#lines + 1] = "(none)"
+		return table.concat(lines, "\n")
+	end
+
+	for index = 1, count do
+		local value = values[index]
+		local valueType = typeof(value)
+		local detail = valueType == "Instance" and safeInstancePath(value) or argumentSummary(value)
+		lines[#lines + 1] = ("[%02d]  %-18s  %s"):format(index, valueType, detail or "unavailable")
+	end
+
+	return table.concat(lines, "\n")
 end
 
 local function describeFunction(func)
@@ -361,7 +425,7 @@ local function describeScript(scriptInstance)
 	local lines = {}
 	lines[#lines + 1] = "Name: " .. scriptInstance.Name
 	lines[#lines + 1] = "Class: " .. scriptInstance.ClassName
-	lines[#lines + 1] = "Path: " .. getInstancePath(scriptInstance)
+	lines[#lines + 1] = "Path: " .. (safeInstancePath(scriptInstance) or "unavailable")
 
 	if type(decompile) == "function" then
 		local decompiled, source = pcall(decompile, scriptInstance)
@@ -387,13 +451,42 @@ local function describeCallStack(callInfo)
 		return "No call is selected."
 	end
 
-	local lines = {}
-	lines[#lines + 1] = "Method: " .. tostring(callInfo.method or "unknown")
-	lines[#lines + 1] = "Timestamp: " .. formatTimestamp(callInfo.timestamp)
-	lines[#lines + 1] = "Off Thread: " .. tostring(callInfo.offThread == true)
-	lines[#lines + 1] = "Calling Script: "
-		.. ((typeof(callInfo.script) == "Instance" and getInstancePath(callInfo.script)) or "unknown")
-	lines[#lines + 1] = "Function: " .. argumentSummary(callInfo.func)
+	local caller = type(callInfo.caller) == "table" and callInfo.caller or {}
+	local state = callInfo.blocked and "Blocked"
+		or (callInfo.error and "Forward error")
+		or (callInfo.forwarded and "Forwarded")
+		or "Captured"
+	local callerName = caller.name or "anonymous"
+	local callerSource = cleanSource(caller.shortSource or caller.source)
+	local callerLine = tonumber(caller.line)
+	local location = callerSource .. ":" .. (callerLine and tostring(math.floor(callerLine)) or "?")
+	local scriptPath = safeInstancePath(callInfo.script) or "unknown"
+	local lines = {
+		"REMOTE CALL TRACE",
+		("Call: %s"):format(tostring(callInfo.method or "unknown")),
+		("State: %s"):format(state),
+		("Captured: %s"):format(formatTimestamp(callInfo.timestamp)),
+		("Duration: %s"):format(
+			type(callInfo.durationMs) == "number" and ("%.3f ms"):format(callInfo.durationMs) or "not available"
+		),
+		("Capture path: %s%s"):format(
+			tostring(caller.captureSource or "unknown"),
+			callInfo.offThread and " (off-thread)" or " (original thread)"
+		),
+		("Calling script: %s"):format(scriptPath),
+		("Caller: %s"):format(tostring(callerName)),
+		("Location: %s"):format(location),
+		("Arguments: %d | Returns: %d"):format(getArgCount(callInfo.args), getArgCount(callInfo.returns)),
+	}
+
+	if callInfo.error then
+		lines[#lines + 1] = "Error: " .. tostring(callInfo.error)
+	end
+
+	if caller.limitation then
+		lines[#lines + 1] = "Capture note: " .. tostring(caller.limitation)
+	end
+
 	lines[#lines + 1] = ""
 
 	local stack = callInfo.stack
@@ -403,29 +496,97 @@ local function describeCallStack(callInfo)
 		return table.concat(lines, "\n")
 	end
 
-	lines[#lines + 1] = "Stack:"
+	lines[#lines + 1] = ("External call chain (%d frames; native and Hydroxide frames removed):"):format(#stack)
 
 	for index, frame in ipairs(stack) do
 		if type(frame) == "table" then
-			local name = frame.name or frame.Name or "<anonymous>"
-			local source = frame.short_src or frame.source or frame.Source or "unknown"
-			local line = frame.currentline or frame.line or frame.Line or "?"
+			local name = frame.name or frame.Name or "anonymous"
+			local source = cleanSource(frame.shortSource or frame.short_src or frame.source or frame.Source)
+			local line = tonumber(frame.line or frame.currentline or frame.Line)
 			local scriptInstance = frame.script or frame.Script
-			local scriptPath = typeof(scriptInstance) == "Instance" and (" [" .. getInstancePath(scriptInstance) .. "]")
-				or ""
-			lines[#lines + 1] = ("%02d  %s  %s:%s%s"):format(
-				index,
-				tostring(name),
-				tostring(source),
-				tostring(line),
-				scriptPath
+			local frameScriptPath = safeInstancePath(scriptInstance)
+			lines[#lines + 1] = ("%02d  %s"):format(index, tostring(name))
+			lines[#lines + 1] = ("    %s:%s%s"):format(
+				source,
+				line and tostring(math.floor(line)) or "?",
+				frameScriptPath and ("  [" .. frameScriptPath .. "]") or ""
 			)
+
+			if index < #stack then
+				lines[#lines + 1] = "    ↓"
+			end
 		else
 			lines[#lines + 1] = ("%02d  %s"):format(index, tostring(frame))
 		end
 	end
 
 	return table.concat(lines, "\n")
+end
+
+local callInspector
+
+local function hasSelectedCall()
+	return selectedCallAlive()
+end
+
+local function hasStringArg()
+	local args = selected.args
+	local argCount = getArgCount(args)
+
+	for index = 1, argCount do
+		if type(args[index]) == "string" then
+			return true
+		end
+	end
+
+	return false
+end
+
+updateCallInspector = function()
+	if not callInspector then
+		return
+	end
+
+	local selectedCall = hasSelectedCall() and selected.callInfo
+
+	if not selectedCall then
+		callInspector:SetStatus("Select a captured call to inspect")
+		callInspector:SetEnabled("GenerateReplay", false)
+		callInspector:SetEnabled("CallStack", false)
+		callInspector:SetEnabled("Function", false)
+		callInspector:SetEnabled("ScriptSource", false)
+		callInspector:SetEnabled("ScriptPath", false)
+		callInspector:SetEnabled("SpyFunction", false)
+		callInspector:SetEnabled("Repeat", false)
+		callInspector:SetEnabled("Hex", false)
+		return
+	end
+
+	local callInfo = selected.callInfo
+	local argCount = getArgCount(selected.args)
+	local caller = typeof(callInfo.script) == "Instance" and callInfo.script.Name or "unknown script"
+	local status = ("%s args | %s"):format(argCount, tostring(callInfo.method or "unknown"))
+	local remoteInstance = selected.remoteLog and selected.remoteLog.Remote and selected.remoteLog.Remote.Instance
+	local method = remoteInstance and getRemoteMethod(remoteInstance, selected.callInfo)
+
+	callInspector:SetStatus(caller, status)
+	callInspector:SetEnabled("GenerateReplay", true)
+	callInspector:SetEnabled("CallStack", true)
+	callInspector:SetEnabled("Function", type(selected.func) == "function")
+	callInspector:SetEnabled("ScriptSource", typeof(selected.callingScript) == "Instance")
+	callInspector:SetEnabled("ScriptPath", typeof(selected.callingScript) == "Instance")
+	callInspector:SetEnabled("SpyFunction", type(selected.func) == "function")
+	callInspector:SetEnabled("Repeat", method ~= nil and remoteInstance and remoteInstance[method] ~= nil)
+	callInspector:SetEnabled("Hex", hasStringArg())
+end
+
+local function selectCall(log, button, callInfo)
+	selected.args = callInfo.args
+	selected.callingScript = callInfo.script
+	selected.func = callInfo.func
+	selected.callInfo = callInfo
+	selected.callPodButton = button
+	updateCallInspector()
 end
 
 local function checkCurrentIgnored()
@@ -708,13 +869,12 @@ function ArgsLog.new(log, callInfo)
 		end
 	end
 
-	button:SetRightCallback(function()
-		selected.args = callInfo.args
-		selected.callingScript = callInfo.script
-		selected.func = callInfo.func
-		selected.callInfo = callInfo
-		selected.callPodButton = button
-	end)
+	local function chooseCall()
+		selectCall(log, button, callInfo)
+	end
+
+	button:SetCallback(chooseCall)
+	button:SetRightCallback(chooseCall)
 
 	button.Instance.Size = button.Instance.Size + UDim2.new(0, 0, 0, height)
 
@@ -1252,69 +1412,60 @@ removeContextSelected:SetCallback(function()
 	selected.logs = {}
 end)
 
-scriptContext:SetCallback(function()
-	if not guardSelectedCall("Generate Script") then
+local function generateReplayScript()
+	if not guardSelectedCall("Generate Replay Script") then
 		return
 	end
 
-	local script =
-		"-- This script was generated by Hydroxide's RemoteSpy: https://github.com/ProtonDev-sys/Hydroxide/tree/potassium-modernization-fork\n\n"
 	local selectedRemote = selected.remoteLog.Remote.Instance
-	local remotePath = getInstancePath(selectedRemote)
 	local method = getRemoteMethod(selectedRemote, selected.callInfo) or "FireServer"
 	local selectedArgs = selected.args or {}
-	local argCount = getArgCount(selectedArgs)
-
 	local oldStatus = oh.getStatus()
-	oh.setStatus("Generating RemoteSpy Pseudocode ...")
 
-	if argCount == 0 then
-		setClipboard(script .. remotePath .. ":" .. method .. "()")
+	oh.setStatus("Generating RemoteSpy replay script ...")
+
+	local script
+	if type(buildRemoteScript) == "function" then
+		local ran, result = pcall(buildRemoteScript, selectedRemote, method, selectedArgs, selected.callInfo)
+		script = ran and result or tostring(result)
 	else
-		local args = ""
-
-		for i = 1, argCount do
-			local v = selectedArgs[i]
-			local robloxValueType = typeof(v)
-			local variableName = robloxValueType:sub(1, 1):upper() .. robloxValueType:sub(2)
-			v = safeDataToString(v)
-
-			script = script .. ("local oh%s%d = %s\n"):format(variableName, i, v)
-			args = args .. ("oh%s%d, "):format(variableName, i)
-		end
-
-		setClipboard(script .. "\n" .. remotePath .. ":" .. method .. "(" .. args:sub(1, -3) .. ")")
+		script = ("-- Generated by Hydroxide RemoteSpy\nlocal remote = %s\nreturn remote:%s()"):format(
+			getInstancePath(selectedRemote),
+			method
+		)
 	end
 
+	TextViewer.Show("Remote Replay Script", script, { Editable = true })
+	setClipboard(script)
 	task.wait(0.25)
 	oh.setStatus(oldStatus)
-end)
+end
 
-callStackContext:SetCallback(function()
+local function showCallStack()
 	if not guardSelectedCall("Remote Call Stack") then
 		return
 	end
 
 	TextViewer.Show("Remote Call Stack", describeCallStack(selected.callInfo))
-end)
+end
 
-inspectFunctionContext:SetCallback(function()
+local function inspectCallingFunction()
 	if not guardSelectedCall("Calling Function") then
 		return
 	end
 
 	TextViewer.Show("Calling Function", describeFunction(selected.func))
-end)
+end
 
-inspectScriptContext:SetCallback(function()
+local function inspectCallingScript()
 	if not guardSelectedCall("Calling Script") then
 		return
 	end
 
 	TextViewer.Show("Calling Script", describeScript(selected.callingScript))
-end)
+end
 
-callingScriptContext:SetCallback(function()
+local function copyCallingScriptPath()
 	if not guardSelectedCall("Calling Script") then
 		return
 	end
@@ -1329,10 +1480,10 @@ callingScriptContext:SetCallback(function()
 	setClipboard(getInstancePath(selected.callingScript))
 	task.wait(0.25)
 	oh.setStatus(oldStatus)
-end)
+end
 
 local SpyHook = ClosureSpy.Hook
-spyClosureContext:SetCallback(function()
+local function spyCallingFunction()
 	if not guardSelectedCall("Spy Calling Function") then
 		return
 	end
@@ -1351,9 +1502,9 @@ spyClosureContext:SetCallback(function()
 			MessageBox.Show("Cannot hook", hookError or ('Unable to hook "%s"'):format(selectedClosure.Name))
 		end
 	end
-end)
+end
 
-repeatCallContext:SetCallback(function()
+local function repeatSelectedCall()
 	if not guardSelectedCall("Repeat Call") then
 		return
 	end
@@ -1382,9 +1533,9 @@ repeatCallContext:SetCallback(function()
 			TextViewer.Show("Repeat Call Failed", tostring(err))
 		end
 	end)
-end)
+end
 
-viewAsHexContext:SetCallback(function()
+local function toggleHexView()
 	if not guardSelectedCall("Toggle String Hex View") or not selected.args then
 		return
 	end
@@ -1427,7 +1578,31 @@ viewAsHexContext:SetCallback(function()
 			end
 		end
 	end
-end)
+end
+
+scriptContext:SetCallback(generateReplayScript)
+callStackContext:SetCallback(showCallStack)
+inspectFunctionContext:SetCallback(inspectCallingFunction)
+inspectScriptContext:SetCallback(inspectCallingScript)
+callingScriptContext:SetCallback(copyCallingScriptPath)
+spyClosureContext:SetCallback(spyCallingFunction)
+repeatCallContext:SetCallback(repeatSelectedCall)
+viewAsHexContext:SetCallback(toggleHexView)
+
+callInspector = ActionPanel.Install(LogsButtons, RemoteLogs.Results, {
+	Columns = 4,
+	Actions = {
+		{ Name = "GenerateReplay", Label = "Replay", Icon = icons.script, Callback = generateReplayScript },
+		{ Name = "CallStack", Label = "Stack", Icon = icons.stack, Callback = showCallStack },
+		{ Name = "Function", Label = "Function", Icon = icons.spy, Callback = inspectCallingFunction },
+		{ Name = "ScriptSource", Label = "Script", Icon = icons.source, Callback = inspectCallingScript },
+		{ Name = "ScriptPath", Label = "Path", Icon = icons.copy, Callback = copyCallingScriptPath },
+		{ Name = "SpyFunction", Label = "Spy Fn", Icon = icons.spy, Callback = spyCallingFunction },
+		{ Name = "Repeat", Label = "Repeat", Icon = icons.repeatCall, Callback = repeatSelectedCall },
+		{ Name = "Hex", Label = "Hex", Icon = icons.hex, Callback = toggleHexView },
+	},
+})
+updateCallInspector()
 
 removeConditionContext:SetCallback(function()
 	selected.condition:Remove()

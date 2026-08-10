@@ -16,6 +16,7 @@ local Dropdown = import("ui/controls/Dropdown")
 local List, ListButton = import("ui/controls/List")
 local MessageBox, MessageType = import("ui/controls/MessageBox")
 local TextViewer = import("ui/controls/TextViewer")
+local ActionPanel = import("ui/controls/ActionPanel")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
 local TabSelector = import("ui/controls/TabSelector")
 
@@ -59,6 +60,10 @@ local icons = {
 	unblock = "rbxassetid://4891642508",
 	ignore = "rbxassetid://4842578510",
 	unignore = "rbxassetid://4842578818",
+	copy = "rbxassetid://4891705738",
+	source = "rbxassetid://4891705738",
+	spy = "rbxassetid://4666593447",
+	stack = "rbxassetid://5179169654",
 }
 
 local constants = {
@@ -90,6 +95,7 @@ local selected = {
 	logs = {},
 	conditions = {},
 }
+local updateCallInspector
 
 local conditionContext = ContextMenuButton.new("rbxassetid://4891633802", "Call Conditions")
 local clearContext = ContextMenuButton.new("rbxassetid://4892169181", "Clear Calls")
@@ -97,11 +103,11 @@ local ignoreContext = ContextMenuButton.new("rbxassetid://4842578510", "Ignore C
 local blockContext = ContextMenuButton.new("rbxassetid://4891641806", "Block Calls")
 local removeContext = ContextMenuButton.new("rbxassetid://4702831188", "Remove Log")
 
-local callStackContext = ContextMenuButton.new("rbxassetid://4800244808", "View Call Stack")
-local inspectFunctionContext = ContextMenuButton.new("rbxassetid://4666593447", "Inspect Calling Function")
-local inspectScriptContext = ContextMenuButton.new("rbxassetid://4800244808", "Inspect Calling Script")
-local callingScriptContext = ContextMenuButton.new("rbxassetid://4800244808", "Get Calling Script")
-local spyClosureContext = ContextMenuButton.new("rbxassetid://4666593447", "Spy Calling Function")
+local callStackContext = ContextMenuButton.new(icons.stack, "View Call Stack")
+local inspectFunctionContext = ContextMenuButton.new(icons.spy, "Inspect Calling Function")
+local inspectScriptContext = ContextMenuButton.new(icons.source, "Inspect Calling Script")
+local callingScriptContext = ContextMenuButton.new(icons.copy, "Copy Calling Script Path")
+local spyClosureContext = ContextMenuButton.new(icons.spy, "Spy Calling Function")
 
 local removeConditionContext = ContextMenuButton.new("rbxassetid://4702831188", "Remove Condition")
 
@@ -163,6 +169,10 @@ local function clearSelectedCall(button)
 	selected.func = nil
 	selected.callInfo = nil
 	selected.callPodButton = nil
+
+	if updateCallInspector then
+		updateCallInspector()
+	end
 end
 
 local function selectedCallAlive()
@@ -378,6 +388,49 @@ local function describeCallStack(call)
 	end
 
 	return table.concat(lines, "\n")
+end
+
+local callInspector
+
+local function hasSelectedCall()
+	return selected.callPodButton and selected.callPodButton.Instance and selected.callPodButton.Instance.Parent
+end
+
+updateCallInspector = function()
+	if not callInspector then
+		return
+	end
+
+	if not hasSelectedCall() or not selected.callInfo then
+		callInspector:SetStatus("Select a captured call to inspect")
+		callInspector:SetEnabled("CallStack", false)
+		callInspector:SetEnabled("Function", false)
+		callInspector:SetEnabled("ScriptSource", false)
+		callInspector:SetEnabled("ScriptPath", false)
+		callInspector:SetEnabled("SpyFunction", false)
+		return
+	end
+
+	local call = selected.callInfo
+	local argCount = getArgCount(selected.args)
+	local caller = typeof(call.script) == "Instance" and call.script.Name or "unknown script"
+	local status = ("%s args | %s"):format(argCount, tostring(call.method or "closure"))
+
+	callInspector:SetStatus(caller, status)
+	callInspector:SetEnabled("CallStack", true)
+	callInspector:SetEnabled("Function", type(selected.func) == "function" or selected.hookLog ~= nil)
+	callInspector:SetEnabled("ScriptSource", typeof(selected.callingScript) == "Instance")
+	callInspector:SetEnabled("ScriptPath", typeof(selected.callingScript) == "Instance")
+	callInspector:SetEnabled("SpyFunction", type(selected.func) == "function")
+end
+
+local function selectCall(_log, button, call)
+	selected.args = call.args
+	selected.callingScript = call.script
+	selected.func = call.func
+	selected.callInfo = call
+	selected.callPodButton = button
+	updateCallInspector()
 end
 
 local function checkCurrentIgnored()
@@ -666,13 +719,12 @@ function ArgsLog.new(log, call)
 		end
 	end
 
-	button:SetRightCallback(function()
-		selected.args = call.args
-		selected.callingScript = call.script
-		selected.func = call.func
-		selected.callInfo = call
-		selected.callPodButton = button
-	end)
+	local function chooseCall()
+		selectCall(log, button, call)
+	end
+
+	button:SetCallback(chooseCall)
+	button:SetRightCallback(chooseCall)
 
 	button.Instance.Size = button.Instance.Size + UDim2.new(0, 0, 0, height)
 
@@ -1154,32 +1206,32 @@ removeContextSelected:SetCallback(function()
 	selected.logs = {}
 end)
 
-callStackContext:SetCallback(function()
+local function showCallStack()
 	if not guardSelectedCall("Closure Call Stack") then
 		return
 	end
 
 	TextViewer.Show("Closure Call Stack", describeCallStack(selected.callInfo))
-end)
+end
 
-inspectFunctionContext:SetCallback(function()
+local function inspectCallingFunction()
 	if not guardSelectedCall("Calling Function") then
 		return
 	end
 
 	local func = selected.func or (selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Target)
 	TextViewer.Show("Calling Function", describeFunction(func))
-end)
+end
 
-inspectScriptContext:SetCallback(function()
+local function inspectCallingScript()
 	if not guardSelectedCall("Calling Script") then
 		return
 	end
 
 	TextViewer.Show("Calling Script", describeScript(selected.callingScript))
-end)
+end
 
-callingScriptContext:SetCallback(function()
+local function copyCallingScriptPath()
 	if not guardSelectedCall("Calling Script") then
 		return
 	end
@@ -1194,10 +1246,10 @@ callingScriptContext:SetCallback(function()
 	setClipboard(getInstancePath(selected.callingScript))
 	task.wait(0.25)
 	oh.setStatus(oldStatus)
-end)
+end
 
 local SpyHook = Methods.Hook
-spyClosureContext:SetCallback(function()
+local function spyCallingFunction()
 	if not guardSelectedCall("Spy Calling Function") then
 		return
 	end
@@ -1222,7 +1274,25 @@ spyClosureContext:SetCallback(function()
 			TabSelector.SelectTab("ClosureSpy")
 		end
 	end)
-end)
+end
+
+callStackContext:SetCallback(showCallStack)
+inspectFunctionContext:SetCallback(inspectCallingFunction)
+inspectScriptContext:SetCallback(inspectCallingScript)
+callingScriptContext:SetCallback(copyCallingScriptPath)
+spyClosureContext:SetCallback(spyCallingFunction)
+
+callInspector = ActionPanel.Install(LogsButtons, ClosureLogs.Results, {
+	Columns = 3,
+	Actions = {
+		{ Name = "CallStack", Label = "Stack", Icon = icons.stack, Callback = showCallStack },
+		{ Name = "Function", Label = "Function", Icon = icons.spy, Callback = inspectCallingFunction },
+		{ Name = "ScriptSource", Label = "Script", Icon = icons.source, Callback = inspectCallingScript },
+		{ Name = "ScriptPath", Label = "Path", Icon = icons.copy, Callback = copyCallingScriptPath },
+		{ Name = "SpyFunction", Label = "Spy Fn", Icon = icons.spy, Callback = spyCallingFunction },
+	},
+})
+updateCallInspector()
 
 removeConditionContext:SetCallback(function()
 	selected.condition:Remove()
