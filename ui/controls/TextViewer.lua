@@ -4,6 +4,8 @@ local TextService = game:GetService("TextService")
 local TextViewer = {}
 local defaultViewer
 local embeddedViewers = setmetatable({}, { __mode = "k" })
+local DEFAULT_DOCK_WIDTH = 0.44
+local EXPANDED_DOCK_WIDTH = 0.72
 
 local function trackInstance(instance)
 	if oh and oh.Instances then
@@ -22,30 +24,32 @@ local function getInterface()
 	return ran and interface or nil
 end
 
+local function findExplorerDock(body)
+	for _, descendant in ipairs(body:GetDescendants()) do
+		if descendant:IsA("TextBox") then
+			local placeholder = tostring(descendant.PlaceholderText or ""):lower()
+
+			if placeholder:find("filter explorer", 1, true) then
+				local ancestor = descendant.Parent
+
+				while ancestor and ancestor ~= body do
+					if ancestor:IsA("GuiObject") and ancestor.Name:lower():find("explorer", 1, true) then
+						return ancestor
+					end
+
+					ancestor = ancestor.Parent
+				end
+			end
+		end
+	end
+end
+
 local function findDefaultDock()
 	local interface = getInterface()
 	local base = interface and interface:FindFirstChild("Base")
 	local body = base and base:FindFirstChild("Body")
 
 	if body then
-		for _, descendant in ipairs(body:GetDescendants()) do
-			if descendant:IsA("TextBox") then
-				local placeholder = tostring(descendant.PlaceholderText or ""):lower()
-
-				if placeholder:find("filter explorer", 1, true) then
-					local ancestor = descendant.Parent
-
-					while ancestor and ancestor ~= body do
-						if ancestor:IsA("GuiObject") and ancestor.Name:lower():find("explorer", 1, true) then
-							return ancestor
-						end
-
-						ancestor = ancestor.Parent
-					end
-				end
-			end
-		end
-
 		local dock = body:FindFirstChild("HydroxideInspectorDock")
 
 		if not dock then
@@ -56,12 +60,13 @@ local function findDefaultDock()
 			dock.BorderSizePixel = 0
 			dock.ClipsDescendants = true
 			dock.Position = UDim2.new(1, -8, 0, 8)
-			dock.Size = UDim2.new(0.4, -12, 1, -16)
+			dock.Size = UDim2.new(DEFAULT_DOCK_WIDTH, -12, 1, -16)
+			dock.Visible = false
 			dock.ZIndex = 70
 			dock.Parent = body
 		end
 
-		return dock
+		return dock, findExplorerDock(body), body:FindFirstChild("Pages")
 	end
 
 	return interface or CoreGui
@@ -105,42 +110,42 @@ local function makeButton(parent, text, position, zIndex)
 end
 
 local function estimateTextSize(text, textSize, font)
-	local sampled = text:sub(1, 65536)
-	local maxLine = ""
-	local lineCount = 1
-	local sampledLines = 0
+	local maxLineSample = ""
+	local maxLineLength = 0
+	local lineCount = 0
+	local lineStart = 1
 
-	for line in (sampled .. "\n"):gmatch("(.-)\n") do
-		if #line > #maxLine then
-			maxLine = line
+	while true do
+		local newline = text:find("\n", lineStart, true)
+		local lineEnd = newline and newline - 1 or #text
+		local lineLength = math.max(0, lineEnd - lineStart + 1)
+		lineCount = lineCount + 1
+
+		if lineLength > maxLineLength then
+			maxLineLength = lineLength
+			maxLineSample = text:sub(lineStart, math.min(lineEnd, lineStart + 1999))
 		end
 
-		sampledLines = sampledLines + 1
-
-		if sampledLines >= 200 then
+		if not newline then
 			break
 		end
-	end
 
-	for _ in text:gmatch("\n") do
-		lineCount = lineCount + 1
-	end
-
-	if #maxLine > 2000 then
-		maxLine = maxLine:sub(1, 2000)
+		lineStart = newline + 1
 	end
 
 	local measured, bounds =
-		pcall(TextService.GetTextSize, TextService, maxLine, textSize, font, Vector2.new(100000, 100000))
+		pcall(TextService.GetTextSize, TextService, maxLineSample, textSize, font, Vector2.new(100000, 100000))
 
 	if not measured then
-		bounds = Vector2.new(math.min(#maxLine * textSize * 0.65, 50000), textSize)
+		bounds = Vector2.new(#maxLineSample * textSize * 0.65, textSize)
 	end
 
-	return Vector2.new(math.max(bounds.X + 24, 360), math.max(lineCount * (textSize + 4) + 24, 160))
+	local characterWidth = #maxLineSample > 0 and bounds.X / #maxLineSample or textSize * 0.65
+	local estimatedWidth = math.max(bounds.X, math.ceil(characterWidth * maxLineLength))
+	return Vector2.new(math.max(estimatedWidth + 24, 360), math.max(lineCount * (textSize + 4) + 24, 160))
 end
 
-local function makeViewer(parent)
+local function makeViewer(parent, sourceDock, pages)
 	local overlay = Instance.new("Frame")
 	overlay.Name = "HydroxideIntegratedTextViewer"
 	overlay.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
@@ -170,7 +175,8 @@ local function makeViewer(parent)
 	stroke.Thickness = 1
 	stroke.Parent = panel
 
-	local title = makeText(panel, "Inspector", UDim2.new(1, -158, 0, 34), UDim2.new(0, 10, 0, 4), panel.ZIndex + 1)
+	local title = makeText(panel, "Inspector", UDim2.new(1, -230, 0, 34), UDim2.new(0, 10, 0, 4), panel.ZIndex + 1)
+	local expand = makeButton(panel, "Expand", UDim2.new(1, -218, 0, 8), panel.ZIndex + 1)
 	local copy = makeButton(panel, "Copy", UDim2.new(1, -146, 0, 8), panel.ZIndex + 1)
 	local hide = makeButton(panel, "Hide", UDim2.new(1, -74, 0, 8), panel.ZIndex + 1)
 
@@ -196,38 +202,113 @@ local function makeViewer(parent)
 	padding.PaddingTop = UDim.new(0, 8)
 	padding.Parent = scroller
 
-	local textBox = Instance.new("TextBox")
-	textBox.BackgroundTransparency = 1
-	textBox.ClearTextOnFocus = false
-	textBox.Font = Enum.Font.Code
-	textBox.MultiLine = true
-	textBox.Selectable = true
-	textBox.Text = ""
-	textBox.TextColor3 = Color3.fromRGB(230, 230, 230)
-	textBox.TextEditable = false
-	textBox.TextSize = 14
-	textBox.TextWrapped = false
-	textBox.TextXAlignment = Enum.TextXAlignment.Left
-	textBox.TextYAlignment = Enum.TextYAlignment.Top
-	textBox.ZIndex = scroller.ZIndex + 1
-	textBox.Parent = scroller
+	local actionFrame = Instance.new("Frame")
+	actionFrame.Name = "Actions"
+	actionFrame.BackgroundTransparency = 1
+	actionFrame.BorderSizePixel = 0
+	actionFrame.Position = UDim2.new(0, 8, 1, -38)
+	actionFrame.Size = UDim2.new(1, -16, 0, 30)
+	actionFrame.Visible = false
+	actionFrame.ZIndex = panel.ZIndex + 2
+	actionFrame.Parent = panel
+
+	local actionLayout = Instance.new("UIListLayout")
+	actionLayout.FillDirection = Enum.FillDirection.Horizontal
+	actionLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+	actionLayout.Padding = UDim.new(0, 6)
+	actionLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	actionLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	actionLayout.Parent = actionFrame
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.BackgroundTransparency = 1
+	textLabel.Font = Enum.Font.Code
+	textLabel.Text = ""
+	textLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+	textLabel.TextSize = 14
+	textLabel.TextWrapped = false
+	textLabel.TextXAlignment = Enum.TextXAlignment.Left
+	textLabel.TextYAlignment = Enum.TextYAlignment.Top
+	textLabel.ZIndex = scroller.ZIndex + 1
+	textLabel.Parent = scroller
 
 	local current = {
+		Dock = parent,
+		SourceDock = sourceDock,
+		Pages = pages,
+		OriginalPagesPosition = pages and pages.Position or nil,
+		OriginalPagesSize = pages and pages.Size or nil,
+		RestorePagesPosition = pages and pages.Position or nil,
+		RestorePagesSize = pages and pages.Size or nil,
+		RestoreSourceDockVisible = sourceDock and sourceDock.Visible or false,
 		Overlay = overlay,
 		Title = title,
-		TextBox = textBox,
+		TextBox = textLabel,
+		TextObject = textLabel,
+		CopyText = "",
 		Scroller = scroller,
+		ActionFrame = actionFrame,
+		Embedded = sourceDock == nil,
+		Expanded = false,
+		OnHide = nil,
 	}
+
+	function current.Hide()
+		local wasVisible = current.Overlay.Visible
+		current.Overlay.Visible = false
+
+		if not current.Embedded then
+			current.Dock.Visible = false
+
+			if current.SourceDock and current.SourceDock.Parent then
+				current.SourceDock.Visible = current.RestoreSourceDockVisible == true
+			end
+
+			if current.Pages and current.RestorePagesSize then
+				current.Pages.Position = current.RestorePagesPosition
+				current.Pages.Size = current.RestorePagesSize
+			end
+		end
+
+		if wasVisible and type(current.OnHide) == "function" then
+			local callback = current.OnHide
+			current.OnHide = nil
+			pcall(callback, current)
+		end
+	end
 
 	trackConnection(copy.MouseButton1Click:Connect(function()
 		if setClipboard then
-			setClipboard(current.TextBox.Text)
+			setClipboard(current.CopyText)
 		end
 	end))
 
 	trackConnection(hide.MouseButton1Click:Connect(function()
-		current.Overlay.Visible = false
+		current.Hide()
 	end))
+
+	if current.Embedded then
+		expand.Visible = false
+		title.Size = UDim2.new(1, -158, 0, 34)
+	else
+		trackConnection(expand.MouseButton1Click:Connect(function()
+			current.Expanded = not current.Expanded
+			local width = current.Expanded and EXPANDED_DOCK_WIDTH or DEFAULT_DOCK_WIDTH
+			current.Dock.Size = UDim2.new(
+				width,
+				-12,
+				1,
+				-16
+			)
+
+			if current.Pages and current.RestorePagesSize then
+				current.Pages.Size =
+					UDim2.new(1 - width, -4, current.RestorePagesSize.Y.Scale, current.RestorePagesSize.Y.Offset)
+			end
+
+			expand.Text = current.Expanded and "Restore" or "Expand"
+		end))
+	end
 
 	return current
 end
@@ -249,13 +330,15 @@ local function ensureViewer(parent)
 		return defaultViewer
 	end
 
-	defaultViewer = makeViewer(findDefaultDock())
+	local dock, sourceDock, pages = findDefaultDock()
+	defaultViewer = makeViewer(dock, sourceDock or false, pages)
 	return defaultViewer
 end
 
 function TextViewer.Show(title, text, options)
 	options = type(options) == "table" and options or {}
 	text = tostring(text or "")
+	local copyText = options.CopyText ~= nil and tostring(options.CopyText) or text
 
 	local settings = oh and oh.Settings or {}
 	local maxBytes = tonumber(options.MaxBytes or settings.MaxInspectorBytes or settings.maxInspectorBytes) or 524288
@@ -265,16 +348,79 @@ function TextViewer.Show(title, text, options)
 	end
 
 	local current = ensureViewer(options.Parent)
+	current.OnHide = type(options.OnHide) == "function" and options.OnHide or nil
+
+	if not current.Embedded and not current.Overlay.Visible then
+		if current.SourceDock and current.SourceDock.Parent then
+			current.RestoreSourceDockVisible = current.SourceDock.Visible
+		end
+
+		if current.Pages then
+			current.RestorePagesPosition = current.Pages.Position
+			current.RestorePagesSize = current.Pages.Size
+		end
+	end
+
+	for _, child in ipairs(current.ActionFrame:GetChildren()) do
+		if child:IsA("GuiButton") then
+			child:Destroy()
+		end
+	end
+
+	local actions = type(options.Actions) == "table" and options.Actions or {}
+	current.ActionFrame.Visible = #actions > 0
+	current.Scroller.Size = UDim2.new(1, -16, 1, #actions > 0 and -86 or -50)
+
+	for index, action in ipairs(actions) do
+		if type(action) == "table" and type(action.Callback) == "function" then
+			local actionButton = makeButton(current.ActionFrame, tostring(action.Label or action.Name or "Action"), UDim2.new(), current.ActionFrame.ZIndex + 1)
+			actionButton.LayoutOrder = index
+			actionButton.Size = UDim2.new(0, math.max(76, tonumber(action.Width) or 92), 0, 26)
+			actionButton.MouseButton1Click:Connect(function()
+				action.Callback(current)
+			end)
+		end
+	end
+
 	current.Title.Text = tostring(title or "Inspector")
 	current.TextBox.Text = text
-	current.TextBox.TextEditable = options.Editable == true
+	current.CopyText = copyText
 	current.Scroller.CanvasPosition = Vector2.new()
 
 	local size = estimateTextSize(text, current.TextBox.TextSize, current.TextBox.Font)
 	current.TextBox.Size = UDim2.new(0, size.X, 0, size.Y)
 	current.Scroller.CanvasSize = UDim2.new(0, size.X + 16, 0, size.Y + 16)
+
+	if not current.Embedded then
+		if current.SourceDock and current.SourceDock.Parent then
+			current.SourceDock.Visible = false
+		end
+
+		current.Dock.Visible = true
+
+		if current.Pages and current.RestorePagesSize then
+			local width = current.Expanded and EXPANDED_DOCK_WIDTH or DEFAULT_DOCK_WIDTH
+			current.Pages.Size =
+				UDim2.new(1 - width, -4, current.RestorePagesSize.Y.Scale, current.RestorePagesSize.Y.Offset)
+		end
+	end
+
 	current.Overlay.Visible = true
 	return current
+end
+
+function TextViewer.HideDefault()
+	if not (defaultViewer and defaultViewer.Overlay) then
+		return
+	end
+
+	defaultViewer.Hide()
+end
+
+function TextViewer.Hide(viewer)
+	if viewer and type(viewer.Hide) == "function" then
+		viewer.Hide()
+	end
 end
 
 return TextViewer

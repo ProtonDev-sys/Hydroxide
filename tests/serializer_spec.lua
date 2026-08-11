@@ -75,6 +75,9 @@ _G.getInfo = function(_)
 end
 
 _G.buffer = {
+    len = function(value)
+        return #value.bytes
+    end,
     tostring = function(value)
         return value.bytes
     end,
@@ -173,6 +176,21 @@ assertEqual(
     "DateTime serialization"
 )
 assertEqual(dataToString(fakeBuffer), 'buffer.fromstring("A\\000B")', "buffer serialization")
+_G.oh.Settings.MaxGeneratedBufferBytes = 2
+assertContains(dataToString(fakeBuffer), "buffer exceeds configured byte limit", "legacy buffer size guard")
+_G.oh.Settings.MaxGeneratedBufferBytes = 65536
+local unreadableBuffer = makeObject({ __type = "buffer" }, "unreadable buffer")
+assertContains(dataToString(unreadableBuffer), "unreadable buffer", "failed buffer read never fabricates empty data")
+local originalBufferToString = _G.buffer.tostring
+_G.buffer.tostring = function()
+    return nil
+end
+assertContains(dataToString(fakeBuffer), "unreadable buffer", "non-string buffer serialization is rejected")
+_G.buffer.tostring = function()
+    return "wrong length"
+end
+assertContains(dataToString(fakeBuffer), "unreadable buffer", "mismatched buffer serialization is rejected")
+_G.buffer.tostring = originalBufferToString
 assertEqual(toUnicode(string.char(0xC3, 0xA9)), "utf8.char(233)", "unicode serialization")
 assertEqual(
     getInstancePath(destroyedInstance),

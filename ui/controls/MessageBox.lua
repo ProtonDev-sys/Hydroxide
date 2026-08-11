@@ -17,6 +17,37 @@ local constants = {
     dynamicHeight = Vector2.new(Object.AbsoluteSize.X, 133742069)
 }
 
+local function hideButtonGroups(buttons)
+    for _, child in ipairs(buttons:GetChildren()) do
+        if child:IsA("GuiObject") then
+            child.Visible = false
+        end
+    end
+end
+
+local function layoutButtons(group, first, second)
+    if not group then
+        return
+    end
+
+    group.AnchorPoint = Vector2.new(0, 0)
+    group.Position = UDim2.new(0, 10, 1, -38)
+    group.Size = UDim2.new(1, -20, 0, 30)
+
+    if second then
+        first.AnchorPoint = Vector2.new(0, 0)
+        second.AnchorPoint = Vector2.new(0, 0)
+        first.Position = UDim2.new(0.5, -95, 0, 2)
+        second.Position = UDim2.new(0.5, 5, 0, 2)
+        first.Size = UDim2.new(0, 90, 0, 25)
+        second.Size = UDim2.new(0, 90, 0, 25)
+    elseif first then
+        first.AnchorPoint = Vector2.new(0, 0)
+        first.Position = UDim2.new(0.5, -45, 0, 2)
+        first.Size = UDim2.new(0, 90, 0, 25)
+    end
+end
+
 MessageType.OK = 1
 MessageType.OKCancel = 2
 MessageType.YesNo = 3
@@ -34,10 +65,11 @@ function MessageBox.Show(title, message, messageType, firstCallback, secondCallb
     local inner = Object.Inner
     local buttons = inner.Buttons
 
-    local messageWidth = TextService:GetTextSize(title, 18, "SourceSans", constants.dynamicWidth).X + 10
-    if messageWidth <= 300 then
-        messageWidth = 300
-    end
+    hideButtonGroups(buttons)
+
+    local titleWidth = TextService:GetTextSize(title, 18, "SourceSans", constants.dynamicWidth).X + 30
+    local bodyWidth = TextService:GetTextSize(message, 18, "SourceSans", constants.dynamicWidth).X + 40
+    local messageWidth = math.max(340, math.min(520, math.max(titleWidth, bodyWidth)))
 
     local messageHeight = TextService:GetTextSize(message, 18, "SourceSans", Vector2.new(messageWidth - 30, 133742069)).Y + 95
 
@@ -80,6 +112,7 @@ function MessageBox.Show(title, message, messageType, firstCallback, secondCallb
         end)
     end
 
+    layoutButtons(selectedButtons, first, second)
     selectedButtons.Visible = true
     Shadow.Visible = true
     Object.Visible = true
@@ -100,7 +133,8 @@ function MessageBox.Hide()
     Shadow.Visible = false
     Object.Visible = false
 
-    selectedButtons.Visible = false
+    hideButtonGroups(Object.Inner.Buttons)
+    selectedButtons = nil
 end
 
 return MessageBox, MessageType

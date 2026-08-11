@@ -601,7 +601,7 @@ setUpvalue(closure, upvalueIndex, value)]]
         return TextViewer.Show("Edit Script Unavailable", tostring(compileError or compiled))
     end
 
-    TextViewer.Show("Upvalue Edit Script", generatedScript, { Editable = true })
+    TextViewer.Show("Upvalue Edit Script", generatedScript)
 end
 
 upvalueScriptContext:SetCallback(function()

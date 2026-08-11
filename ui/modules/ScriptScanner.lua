@@ -12,6 +12,7 @@ local List, ListButton = import("ui/controls/List")
 local ContextMenu, ContextMenuButton = import("ui/controls/ContextMenu")
 local TextViewer = import("ui/controls/TextViewer")
 local FunctionInspector = import("ui/controls/FunctionInspector")
+local LocalScriptModel = import("objects/LocalScript")
 
 local Page = import("rbxassetid://11389137937").Base.Body.Pages.ScriptScanner
 local Assets = import("rbxassetid://5042114982").ScriptScanner
@@ -61,6 +62,15 @@ local showSectionByName
 local renderSelectedSection
 local ensureMetadata
 local functionInspectionGeneration = 0
+local detailLoadGeneration = 0
+local detailRenderGeneration = 0
+local scanGeneration = 0
+local scanInitialized = false
+local scanLoading = false
+local pendingScanQuery
+local resetSummaryQueue
+local sourceViewer
+local alive = true
 local icons = {
 	LocalScript = "rbxassetid://4800244808",
 	Script = "rbxassetid://4800244808",
@@ -69,7 +79,13 @@ local icons = {
 local constants = {
 	fadeLength = TweenInfo.new(0.15),
 	textWidth = Vector2.new(133742069, 20),
-	maxPreviewRows = 500,
+	maxPreviewRows = 250,
+	maxScannedEntries = 4096,
+	maxScriptRows = math.max(
+		50,
+		math.min(2000, math.floor(tonumber(oh.Settings and oh.Settings.MaxScriptRows) or 750))
+	),
+	rowBatch = 20,
 }
 
 local pathContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Script Path")
@@ -144,8 +160,15 @@ local function showSource(title, source, errorMessage, activate)
 		showSectionByName("Source")
 	end
 
-	TextViewer.Show(title, source or ("Source unavailable:\n" .. tostring(errorMessage or "unknown error")), {
+	local generation = functionInspectionGeneration
+	sourceViewer = TextViewer.Show(title, source or ("Source unavailable:\n" .. tostring(errorMessage or "unknown error")), {
 		Parent = InfoSource,
+		OnHide = function()
+			if generation == functionInspectionGeneration then
+				functionInspectionGeneration = functionInspectionGeneration + 1
+				selected.sourceView = nil
+			end
+		end,
 	})
 end
 
@@ -163,8 +186,15 @@ local function showSourceText(title, text)
 		showSectionByName("Source")
 	end
 
-	TextViewer.Show(title, tostring(text or ""), {
+	local generation = functionInspectionGeneration
+	sourceViewer = TextViewer.Show(title, tostring(text or ""), {
 		Parent = InfoSource,
+		OnHide = function()
+			if generation == functionInspectionGeneration then
+				functionInspectionGeneration = functionInspectionGeneration + 1
+				selected.sourceView = nil
+			end
+		end,
 	})
 end
 
@@ -235,10 +265,11 @@ local function textMatches(query, ...)
 	return false
 end
 
-local function makeEntries(values, limit, matches)
+local function makeEntries(values, limit, matches, isCurrent)
 	local entries = {}
 	local total = 0
 	local matched = 0
+	local scanLimited = false
 
 	if type(values) ~= "table" then
 		return entries, total, matched
@@ -246,6 +277,12 @@ local function makeEntries(values, limit, matches)
 
 	for key, value in next, values do
 		total = total + 1
+
+		if total > constants.maxScannedEntries then
+			scanLimited = true
+			break
+		end
+
 		local entryMatches = not matches or matches(key, value)
 
 		if entryMatches then
@@ -259,12 +296,20 @@ local function makeEntries(values, limit, matches)
 				Sort = type(key) == "number" and ("0:%020.6f"):format(key) or "1:" .. safeSummary(key),
 			}
 		end
+
+		if total % 128 == 0 then
+			task.wait()
+
+			if not isCurrent() then
+				return nil, total, matched, scanLimited, true
+			end
+		end
 	end
 
 	table.sort(entries, function(left, right)
 		return left.Sort < right.Sort
 	end)
-	return entries, total, matched
+	return entries, total, matched, scanLimited
 end
 
 local function configureRow(information, index, value, labelText, valueType)
@@ -313,8 +358,17 @@ local function viewFunctionSource(func)
 				description = FunctionInspector.DescribeFunction(func, {
 					Summarize = safeSummary,
 					GetPath = safeInstancePath,
+					IsAlive = function()
+						return generation == functionInspectionGeneration
+							and selected.scriptLog == log
+							and alive
+							and Page.Parent ~= nil
+							and Page.Visible
+					end,
+					MaxOutputBytes = 131072,
+					MaxSourceBytes = 32768,
 					Decompile = function(target)
-						return log.LocalScript:Decompile(target)
+						return log.LocalScript:Decompile(target, 32768)
 					end,
 				})
 			end)
@@ -465,7 +519,11 @@ local function constantMatches(index, value, query)
 	return textMatches(query, index, syntaxKey, label)
 end
 
-local function renderTable(list, statusLabel, values, errorMessage, query, matches, createRow)
+local function renderTable(list, statusLabel, values, errorMessage, query, matches, createRow, isCurrent)
+	if not isCurrent() then
+		return
+	end
+
 	list:Clear()
 	statusLabel.Text = ""
 
@@ -474,22 +532,53 @@ local function renderTable(list, statusLabel, values, errorMessage, query, match
 		return
 	end
 
-	local entries, total, matched = makeEntries(values, constants.maxPreviewRows, function(index, value)
-		return matches(index, value, query)
-	end)
+	local entries, total, matched, scanLimited, cancelled = makeEntries(
+		values,
+		constants.maxPreviewRows,
+		function(index, value)
+			return matches(index, value, query)
+		end,
+		isCurrent
+	)
+
+	if cancelled or not isCurrent() then
+		return
+	end
+
 	local shown = 0
+	local entryIndex = 1
 
-	list:BeginBatch()
+	while entryIndex <= #entries do
+		if not isCurrent() then
+			return
+		end
 
-	for _, entry in ipairs(entries) do
-		if createRow(entry.Key, entry.Value) then
-			shown = shown + 1
+		local lastIndex = math.min(#entries, entryIndex + constants.rowBatch - 1)
+		list:BeginBatch()
+
+		for index = entryIndex, lastIndex do
+			local entry = entries[index]
+
+			if createRow(entry.Key, entry.Value) then
+				shown = shown + 1
+			end
+		end
+
+		list:EndBatch()
+		entryIndex = lastIndex + 1
+
+		if entryIndex <= #entries then
+			task.wait()
 		end
 	end
 
-	list:EndBatch()
+	if not isCurrent() then
+		return
+	end
 
-	if matched > #entries then
+	if scanLimited then
+		statusLabel.Text = ("Showing %d matches from the first %d entries (scan safety limit)."):format(shown, total - 1)
+	elseif matched > #entries then
 		statusLabel.Text = ("Showing %d of %d matches (%d total entries)."):format(shown, matched, total)
 	elseif matched == 0 then
 		statusLabel.Text = "No entries matched the current filter."
@@ -503,41 +592,59 @@ renderSelectedSection = function(sectionName)
 		return
 	end
 
-	if not sectionName or sectionName == "Protos" then
-		renderTable(
-			protosList,
-			ProtosResultsStatus,
-			log.Protos,
-			log.ProtosError or (not log.MetadataLoaded and "Loading protos ..." or nil),
-			getSearchText(ProtosQuery),
-			protoMatches,
-			createProto
-		)
+	sectionName = sectionName or visibleSectionName()
+	detailRenderGeneration = detailRenderGeneration + 1
+	local generation = detailRenderGeneration
+	local function isCurrent()
+		return generation == detailRenderGeneration
+			and selected.scriptLog == log
+			and alive
+			and Page.Parent ~= nil
+			and Page.Visible
+			and ScriptInfo.Visible
+			and visibleSectionName() == sectionName
 	end
 
-	if not sectionName or sectionName == "Constants" then
-		renderTable(
-			constantsList,
-			ConstantsResultsStatus,
-			log.Constants,
-			log.ConstantsError or (not log.MetadataLoaded and "Loading constants ..." or nil),
-			getSearchText(ConstantsQuery),
-			constantMatches,
-			createConstant
-		)
-	end
+	task.spawn(function()
+		if not isCurrent() then
+			return
+		end
 
-	if not sectionName or sectionName == "Environment" then
-		renderTable(
-			environmentList,
-			EnvironmentResultsStatus,
-			log.Environment,
-			log.EnvironmentError or (not log.DetailsLoaded and "Loading environment ..." or nil),
-			getSearchText(EnvironmentQuery),
-			environmentMatches,
-			createEnvironment
-		)
-	end
+		if sectionName == "Protos" then
+			renderTable(
+				protosList,
+				ProtosResultsStatus,
+				log.Protos,
+				log.ProtosError or (not log.MetadataLoaded and "Loading protos ..." or nil),
+				getSearchText(ProtosQuery),
+				protoMatches,
+				createProto,
+				isCurrent
+			)
+		elseif sectionName == "Constants" then
+			renderTable(
+				constantsList,
+				ConstantsResultsStatus,
+				log.Constants,
+				log.ConstantsError or (not log.MetadataLoaded and "Loading constants ..." or nil),
+				getSearchText(ConstantsQuery),
+				constantMatches,
+				createConstant,
+				isCurrent
+			)
+		elseif sectionName == "Environment" then
+			renderTable(
+				environmentList,
+				EnvironmentResultsStatus,
+				log.Environment,
+				log.EnvironmentError or (not log.DetailsLoaded and "Loading environment ..." or nil),
+				getSearchText(EnvironmentQuery),
+				environmentMatches,
+				createEnvironment,
+				isCurrent
+			)
+		end
+	end)
 end
 
 local function clearDetailLists()
@@ -560,22 +667,40 @@ local function updateSummaryCounts(log)
 	button.Constants.Text = log.Constants and #log.Constants or "!"
 end
 
-ensureMetadata = function(log)
+ensureMetadata = function(log, isCurrent)
 	while log.MetadataLoading do
 		task.wait()
+
+		if type(isCurrent) == "function" and not isCurrent() then
+			return false, "cancelled"
+		end
 	end
 
 	if log.MetadataLoaded then
-		return
+		return true
 	end
 
 	log.MetadataLoading = true
 	local loaded, loadError = pcall(function()
 		runPrivileged(function()
 			log.Protos, log.ProtosError = log.LocalScript:LoadProtos()
+		end)
+
+		task.wait()
+
+		if type(isCurrent) == "function" and not isCurrent() then
+			return
+		end
+
+		runPrivileged(function()
 			log.Constants, log.ConstantsError = log.LocalScript:LoadConstants()
 		end)
 	end)
+
+	if type(isCurrent) == "function" and not isCurrent() then
+		log.MetadataLoading = false
+		return false, "cancelled"
+	end
 
 	if not loaded then
 		local message = "Metadata inspection failed: " .. tostring(loadError)
@@ -586,12 +711,13 @@ ensureMetadata = function(log)
 	log.MetadataLoading = false
 	log.MetadataLoaded = true
 	updateSummaryCounts(log)
+	return true
 end
 
 -- Log Object
 local Log = {}
 
-function Log.new(localScript)
+function Log.new(localScript, generation)
 	local log = {}
 	local scriptInstance = localScript.Instance
 	local button = Assets.ScriptLog:Clone()
@@ -613,6 +739,8 @@ function Log.new(localScript)
 		selected.environmentValue = nil
 		selected.environmentIndex = nil
 		functionInspectionGeneration = functionInspectionGeneration + 1
+		detailLoadGeneration = detailLoadGeneration + 1
+		log.DetailsOpenGeneration = detailLoadGeneration
 
 		ScriptList.Visible = false
 		ScriptInfo.Visible = true
@@ -642,22 +770,49 @@ function Log.new(localScript)
 		log.DetailsLoading = true
 
 		task.spawn(function()
-			local metadataLoaded, metadataError = pcall(ensureMetadata, log)
+			local function requestIsCurrent()
+				return log.DetailsOpenGeneration == detailLoadGeneration
+					and selected.scriptLog == log
+					and log.Generation == scanGeneration
+					and log.Button
+					and log.Button.Instance
+					and log.Button.Instance.Parent ~= nil
+					and alive
+					and Page.Parent ~= nil
+					and Page.Visible
+			end
 
-			if not metadataLoaded then
-				local message = "Metadata inspection failed: " .. tostring(metadataError)
+			local metadataRan, metadataLoaded, metadataError = pcall(ensureMetadata, log, requestIsCurrent)
+
+			if not metadataRan then
+				local message = "Metadata inspection failed: " .. tostring(metadataLoaded)
 				log.ProtosError = log.ProtosError or message
 				log.ConstantsError = log.ConstantsError or message
 				log.MetadataLoading = false
 				log.MetadataLoaded = true
+			elseif not metadataLoaded then
+				log.DetailsLoading = false
+				return
 			end
 
-			if selected.scriptLog == log then
+			if requestIsCurrent() then
 				local sectionName = visibleSectionName()
 
 				if sectionName == "Protos" or sectionName == "Constants" then
 					renderSelectedSection(sectionName)
 				end
+			end
+
+			if not requestIsCurrent() then
+				log.DetailsLoading = false
+				return
+			end
+
+			task.wait()
+
+			if not requestIsCurrent() then
+				log.DetailsLoading = false
+				return
 			end
 
 			local environmentLoaded, environmentLoadError = pcall(function()
@@ -671,8 +826,20 @@ function Log.new(localScript)
 				log.EnvironmentError = log.EnvironmentError or message
 			end
 
-			if selected.scriptLog == log and visibleSectionName() == "Environment" then
+			if requestIsCurrent() and visibleSectionName() == "Environment" then
 				renderSelectedSection("Environment")
+			end
+
+			if not requestIsCurrent() then
+				log.DetailsLoading = false
+				return
+			end
+
+			task.wait()
+
+			if not requestIsCurrent() then
+				log.DetailsLoading = false
+				return
 			end
 
 			local sourceLoaded, sourceLoadError = pcall(function()
@@ -689,7 +856,7 @@ function Log.new(localScript)
 			log.DetailsLoaded = true
 			updateSummaryCounts(log)
 
-			if selected.scriptLog == log then
+			if requestIsCurrent() then
 				if selected.sourceView == "script" then
 					showSource(scriptName .. " Source", log.Source, log.SourceError, false)
 				end
@@ -712,10 +879,12 @@ function Log.new(localScript)
 	scriptLogs[scriptInstance] = log
 
 	log.LocalScript = localScript
+	log.Generation = generation or scanGeneration
 	log.Button = listButton
 	log.Open = openLog
+	log.SummaryQueued = false
 
-	if queueSummaryLoad then
+	if queueSummaryLoad and Page.Visible then
 		queueSummaryLoad(log)
 	end
 
@@ -724,27 +893,47 @@ end
 
 do
 	local summaryQueue = {}
-	local summaryRunning = false
-	local summaryIndex = 1
+	local summaryHead = 1
+	local summaryTail = 0
 	local activeWorkers = 0
-	local workerLimit = 3
+	local workerLimit = 2
+	local queueGeneration = 0
+	local pumpQueue
 
-	local function processSummaryQueue()
-		while true do
-			local log = summaryQueue[summaryIndex]
+	local function processSummaryQueue(workerGeneration)
+		while alive and Page.Parent ~= nil and workerGeneration == queueGeneration and Page.Visible do
+			local log = summaryQueue[summaryHead]
 
 			if not log then
 				break
 			end
 
-			summaryIndex = summaryIndex + 1
+			summaryQueue[summaryHead] = nil
+			summaryHead = summaryHead + 1
+			log.SummaryQueued = false
 
-			if not log.SummaryLoaded and log.Button and log.Button.Instance and log.Button.Instance.Parent then
-				local loaded, loadError = pcall(ensureMetadata, log)
-				log.SummaryLoaded = true
+			if
+				log.Generation == scanGeneration
+				and not log.SummaryLoaded
+				and log.Button
+				and log.Button.Instance
+				and log.Button.Instance.Parent
+			then
+				local function requestIsCurrent()
+					return alive
+						and Page.Parent ~= nil
+						and Page.Visible
+						and workerGeneration == queueGeneration
+						and log.Generation == scanGeneration
+						and log.Button
+						and log.Button.Instance
+						and log.Button.Instance.Parent ~= nil
+				end
+				local loaded, completed = pcall(ensureMetadata, log, requestIsCurrent)
+				log.SummaryLoaded = loaded and completed == true and log.MetadataLoaded == true
 
 				if not loaded then
-					local message = "Metadata worker failed: " .. tostring(loadError)
+					local message = "Metadata worker failed: " .. tostring(completed)
 					log.ProtosError = log.ProtosError or message
 					log.ConstantsError = log.ConstantsError or message
 					log.MetadataLoading = false
@@ -757,47 +946,208 @@ do
 		end
 
 		activeWorkers = activeWorkers - 1
+		pumpQueue()
+	end
 
-		if activeWorkers == 0 then
-			table.clear(summaryQueue)
-			summaryIndex = 1
-			summaryRunning = false
+	pumpQueue = function()
+		while alive and Page.Parent ~= nil and Page.Visible and activeWorkers < workerLimit and summaryHead <= summaryTail do
+			activeWorkers = activeWorkers + 1
+			task.defer(processSummaryQueue, queueGeneration)
 		end
 	end
 
+	resetSummaryQueue = function()
+		queueGeneration = queueGeneration + 1
+		summaryQueue = {}
+		summaryHead = 1
+		summaryTail = 0
+	end
+
 	queueSummaryLoad = function(log)
-		summaryQueue[#summaryQueue + 1] = log
-
-		if not summaryRunning then
-			summaryRunning = true
-			activeWorkers = workerLimit
-
-			for _ = 1, workerLimit do
-				task.defer(processSummaryQueue)
-			end
+		if not alive or Page.Parent == nil then
+			return
+		elseif log.SummaryQueued or log.SummaryLoaded then
+			pumpQueue()
+			return
 		end
+
+		log.SummaryQueued = true
+		summaryTail = summaryTail + 1
+		summaryQueue[summaryTail] = log
+		pumpQueue()
 	end
 end
 
 -- UI Functionality
 
+local function rowComesBefore(left, right)
+	if left.Sort == right.Sort then
+		return left.Stable < right.Stable
+	end
+
+	return left.Sort < right.Sort
+end
+
+local function addBoundedRow(rows, row)
+	if #rows < constants.maxScriptRows then
+		rows[#rows + 1] = row
+		local child = #rows
+
+		while child > 1 do
+			local parent = math.floor(child / 2)
+
+			if not rowComesBefore(rows[parent], rows[child]) then
+				break
+			end
+
+			rows[parent], rows[child] = rows[child], rows[parent]
+			child = parent
+		end
+
+		return
+	elseif not rowComesBefore(row, rows[1]) then
+		return
+	end
+
+	rows[1] = row
+	local parent = 1
+
+	while true do
+		local left = parent * 2
+		local right = left + 1
+		local greatest = parent
+
+		if left <= #rows and rowComesBefore(rows[greatest], rows[left]) then
+			greatest = left
+		end
+
+		if right <= #rows and rowComesBefore(rows[greatest], rows[right]) then
+			greatest = right
+		end
+
+		if greatest == parent then
+			break
+		end
+
+		rows[parent], rows[greatest] = rows[greatest], rows[parent]
+		parent = greatest
+	end
+end
+
+local function clearModelSourceCaches()
+	for _, log in pairs(scriptLogs) do
+		local model = log and log.LocalScript
+
+		if model and type(model.ClearFunctionSourceCache) == "function" then
+			pcall(model.ClearFunctionSourceCache, model)
+		end
+	end
+end
+
 local function addScripts(query)
+	pendingScanQuery = query
+	scanInitialized = true
+	scanLoading = true
+	scanGeneration = scanGeneration + 1
+	local generation = scanGeneration
+	resetSummaryQueue()
 	scriptList:Clear()
 	protosList:Clear()
 	constantsList:Clear()
 	environmentList:Clear()
+	clearModelSourceCaches()
 	scriptLogs = {}
 	selected.scriptLog = nil
 	selected.logContext = nil
 	selected.sourceView = nil
 	functionInspectionGeneration = functionInspectionGeneration + 1
-	scriptList:BeginBatch()
+	detailLoadGeneration = detailLoadGeneration + 1
+	detailRenderGeneration = detailRenderGeneration + 1
 
-	for _instance, localScript in pairs(Methods.Scan(query)) do
-		Log.new(localScript)
-	end
+	task.spawn(function()
+		local rows = {}
+		local scanned, total, cancelled = pcall(Methods.Enumerate, query, function(instance)
+			addBoundedRow(rows, {
+				Instance = instance,
+				Sort = tostring(instance.Name or instance):lower(),
+				Stable = tostring(instance),
+			})
+		end, {
+			IsCancelled = function()
+				return generation ~= scanGeneration or not alive or Page.Parent == nil or not Page.Visible
+			end,
+			YieldEvery = 128,
+		})
 
-	scriptList:EndBatch()
+		if not scanned then
+			if generation == scanGeneration and Page.Visible then
+				scanLoading = false
+				oh.setStatus("Script scan failed: " .. tostring(total))
+			end
+
+			return
+		end
+
+		if cancelled or generation ~= scanGeneration or not Page.Visible then
+			if generation == scanGeneration then
+				scanLoading = false
+				scanInitialized = false
+			end
+
+			return
+		end
+
+		table.sort(rows, rowComesBefore)
+
+		local shown = #rows
+		local index = 1
+
+		while index <= shown do
+			if generation ~= scanGeneration or not alive or Page.Parent == nil or not Page.Visible then
+				if generation == scanGeneration then
+					scanLoading = false
+					scanInitialized = false
+				end
+
+				return
+			end
+
+			local lastIndex = math.min(shown, index + constants.rowBatch - 1)
+			scriptList:BeginBatch()
+			local created, createError = pcall(function()
+				for rowIndex = index, lastIndex do
+					Log.new(LocalScriptModel.new(rows[rowIndex].Instance), generation)
+				end
+			end)
+			scriptList:EndBatch()
+
+			if not created then
+				if generation == scanGeneration and Page.Visible then
+					scanLoading = false
+					oh.setStatus("Script rows could not be created: " .. tostring(createError))
+				end
+
+				return
+			end
+
+			index = lastIndex + 1
+
+			if index <= shown then
+				task.wait()
+			end
+		end
+
+		if generation == scanGeneration and Page.Visible then
+			scanLoading = false
+			scanInitialized = true
+
+			if total > shown then
+				oh.setStatus(("Showing %d of %d running scripts (row safety limit)."):format(shown, total))
+			else
+				oh.setStatus(("Script Scanner - %d running script%s"):format(total, total == 1 and "" or "s"))
+			end
+		end
+	end)
 end
 
 ListSearch.FocusLost:Connect(function(returned)
@@ -810,8 +1160,6 @@ end)
 ListRefresh.MouseButton1Click:Connect(function()
 	addScripts()
 end)
-
-addScripts()
 
 pathContext:SetCallback(function()
 	local log = selected.logContext
@@ -846,6 +1194,10 @@ environmentSourceContext:SetCallback(function()
 end)
 
 InfoBack.MouseButton1Click:Connect(function()
+	functionInspectionGeneration = functionInspectionGeneration + 1
+	detailLoadGeneration = detailLoadGeneration + 1
+	detailRenderGeneration = detailRenderGeneration + 1
+	TextViewer.Hide(sourceViewer)
 	ScriptInfo.Visible = false
 	ScriptList.Visible = true
 end)
@@ -907,10 +1259,18 @@ for _i, sectionButton in pairs(InfoOptions:GetChildren()) do
 		local leaveAnimation = TweenService:Create(label, constants.fadeLength, { TextTransparency = 0.2 })
 
 		sectionButton.MouseButton1Click:Connect(function()
+			functionInspectionGeneration = functionInspectionGeneration + 1
+			TextViewer.Hide(sourceViewer)
 			showSectionByName(sectionButton.Name)
 
-			if sectionButton.Name ~= "Source" and selected.scriptLog then
-				renderSelectedSection(sectionButton.Name)
+			if selected.scriptLog then
+				if sectionButton.Name == "Source" then
+					local log = selected.scriptLog
+					selected.sourceView = "script"
+					showSource(log.LocalScript.Instance.Name .. " Source", log.Source, log.SourceError, false)
+				else
+					renderSelectedSection(sectionButton.Name)
+				end
 			end
 		end)
 
@@ -934,5 +1294,55 @@ for _i, sectionButton in pairs(InfoOptions:GetChildren()) do
 end
 
 showSectionByName("Source")
+
+Page:GetPropertyChangedSignal("Visible"):Connect(function()
+	if not alive then
+		return
+	end
+
+	if not Page.Visible then
+		if scanLoading then
+			scanGeneration = scanGeneration + 1
+			scanLoading = false
+			scanInitialized = false
+			resetSummaryQueue()
+		end
+
+		functionInspectionGeneration = functionInspectionGeneration + 1
+		detailLoadGeneration = detailLoadGeneration + 1
+		detailRenderGeneration = detailRenderGeneration + 1
+		TextViewer.Hide(sourceViewer)
+		return
+	end
+
+	if not scanInitialized and not scanLoading then
+		addScripts(pendingScanQuery)
+	end
+
+	for _, log in pairs(scriptLogs) do
+		queueSummaryLoad(log)
+	end
+
+	local log = selected.scriptLog
+
+	if ScriptInfo.Visible and log and log.Open then
+		log.Open()
+	end
+end)
+
+if Page.Visible and not scanInitialized then
+	addScripts()
+end
+
+Page.Destroying:Connect(function()
+	alive = false
+	scanGeneration = scanGeneration + 1
+	functionInspectionGeneration = functionInspectionGeneration + 1
+	detailLoadGeneration = detailLoadGeneration + 1
+	detailRenderGeneration = detailRenderGeneration + 1
+	clearModelSourceCaches()
+	resetSummaryQueue()
+	TextViewer.Hide(sourceViewer)
+end)
 
 return ScriptScanner

@@ -417,14 +417,24 @@ local function makeSerializer(state)
 
 			return unsupported(valueType, isKey, pathError)
 		elseif valueType == "buffer" then
-			if not buffer or type(buffer.tostring) ~= "function" then
-				return unsupported(valueType, isKey, "buffer.tostring is unavailable")
+			if not buffer or type(buffer.len) ~= "function" or type(buffer.tostring) ~= "function" then
+				return unsupported(valueType, isKey, "buffer.len or buffer.tostring is unavailable")
+			end
+
+			local measured, byteLength = pcall(buffer.len, value)
+
+			if not measured or type(byteLength) ~= "number" then
+				return unsupported(valueType, isKey, "buffer length could not be read")
+			elseif byteLength > state.maxBufferBytes then
+				return unsupported(valueType, isKey, "buffer exceeds the configured byte limit")
 			end
 
 			local ran, bytes = pcall(buffer.tostring, value)
 
 			if not ran or type(bytes) ~= "string" then
 				return unsupported(valueType, isKey, "buffer contents could not be read")
+			elseif #bytes ~= byteLength then
+				return unsupported(valueType, isKey, "buffer contents length did not match buffer.len")
 			elseif #bytes > state.maxBufferBytes then
 				return unsupported(valueType, isKey, "buffer exceeds the configured byte limit")
 			end

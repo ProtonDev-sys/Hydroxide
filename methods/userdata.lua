@@ -113,14 +113,24 @@ local function getInstancePath(instance)
 end
 
 local function bufferValue(data)
-    if not buffer or not buffer.tostring then
-        return "buffer.fromstring(\"\")"
+    if not buffer or type(buffer.len) ~= "function" or type(buffer.tostring) ~= "function" then
+        return "nil --[[ buffer serialization unavailable ]]"
+    end
+
+    local measured, byteLength = pcall(buffer.len, data)
+    local settings = oh and oh.Settings or {}
+    local maximum = tonumber(settings.MaxGeneratedBufferBytes or settings.maxGeneratedBufferBytes) or 65536
+
+    if not measured or type(byteLength) ~= "number" then
+        return "nil --[[ unreadable buffer ]]"
+    elseif byteLength > maximum then
+        return "nil --[[ buffer exceeds configured byte limit ]]"
     end
 
     local ok, serialized = pcall(buffer.tostring, data)
 
-    if not ok then
-        return "buffer.fromstring(\"\")"
+    if not ok or type(serialized) ~= "string" or #serialized ~= byteLength or #serialized > maximum then
+        return "nil --[[ unreadable buffer ]]"
     end
 
     return "buffer.fromstring(" .. quoteString(serialized) .. ")"

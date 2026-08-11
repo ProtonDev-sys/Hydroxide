@@ -7,7 +7,28 @@ local function assertEqual(actual, expected, label)
     end
 end
 
-_G.typeof = _G.typeof or type
+local fakeBuffer = {}
+
+function fakeBuffer.fromstring(bytes)
+    return { __type = "buffer", bytes = bytes }
+end
+
+function fakeBuffer.tostring(value)
+    return value.bytes
+end
+
+function fakeBuffer.len(value)
+    return #value.bytes
+end
+
+function fakeBuffer.readu8(value, offset)
+    return assert(value.bytes:byte(offset + 1))
+end
+
+_G.buffer = fakeBuffer
+_G.typeof = function(value)
+    return type(value) == "table" and value.__type or type(value)
+end
 table.find = table.find or function(values, target)
     for index, value in ipairs(values) do
         if value == target then
@@ -38,6 +59,13 @@ assertEqual(#remote.Logs, 2, "bounded log count")
 assertEqual(remote.Logs[1], second, "oldest log evicted")
 assertEqual(remote.Logs[2], third, "newest log retained")
 
+local byteBoundRemote = Remote.new({}, 10, 3)
+byteBoundRemote:IncrementCalls({ id = "A", capturedBytes = 2 })
+byteBoundRemote:IncrementCalls({ id = "B", capturedBytes = 2 })
+assertEqual(#byteBoundRemote.Logs, 1, "remote history byte budget evicts the oldest call")
+assertEqual(byteBoundRemote.Logs[1].id, "B", "remote history byte budget retains the newest call")
+assertEqual(byteBoundRemote.HistoryBytes, 2, "remote history byte accounting is bounded")
+
 remote:DecrementCalls(second)
 assertEqual(#remote.Logs, 1, "circular history removes a logical entry")
 assertEqual(remote.Logs[1], third, "circular history preserves order after removal")
@@ -54,6 +82,22 @@ local packedArguments = {
 
 assertEqual(remote:AreArgsBlocked(packedArguments), true, "nil packed argument can be blocked by type")
 assertEqual(remote:AreArgsIgnored(packedArguments), true, "argument after packed nil can be ignored")
+
+local conditionRemote = Remote.new({}, 2)
+assertEqual(conditionRemote:BlockArg(1, nil, false), true, "exact nil normalizes to a nil type condition")
+assertEqual(conditionRemote:BlockArg(2, 0 / 0, false), true, "NaN condition is stored without a table-key crash")
+local expectedBuffer = fakeBuffer.fromstring("A\0B")
+local matchingBuffer = fakeBuffer.fromstring("A\0B")
+assertEqual(conditionRemote:BlockArg(3, expectedBuffer, false), true, "buffer value condition added")
+assertEqual(conditionRemote:BlockArg(3, expectedBuffer, false), false, "duplicate condition rejected")
+assertEqual(conditionRemote:BlockArg(0, "string", true), false, "invalid condition index rejected")
+assertEqual(conditionRemote:AreArgsBlocked({ n = 1 }), true, "exact nil condition matches packed nil")
+assertEqual(conditionRemote:AreArgsBlocked({ n = 2, [1] = true, [2] = 0 / 0 }), true, "NaN condition matches")
+assertEqual(
+    conditionRemote:AreArgsBlocked({ n = 3, [1] = true, [2] = 2, [3] = matchingBuffer }),
+    true,
+    "equivalent buffer contents match without identity"
+)
 
 remote:Clear()
 assertEqual(remote.TotalCalls, 0, "clear resets total calls")
@@ -146,6 +190,8 @@ do
     _G.typeof = function(value)
         if type(value) == "table" and value.__instance then
             return "Instance"
+        elseif type(value) == "table" and value.__type then
+            return value.__type
         end
 
         return type(value)
@@ -168,7 +214,14 @@ do
             CaptureExecutorCalls = false,
             CaptureCallStacks = true,
             MaxStackCapturesPerSecond = 1,
-            MaxRemoteLogs = 2
+            MaxRemoteLogs = 2,
+            MaxGeneratedBufferBytes = 64,
+            MaxGeneratedTableEntries = 32,
+            MaxGeneratedTableDepth = 8,
+            MaxHexBytes = 4,
+            MaxCapturedCallBytes = 4096,
+            MaxCapturedArguments = 128,
+            MaxRemoteHistoryBytes = 65536
         }
     }
     _G.import = function(path)
@@ -307,6 +360,50 @@ do
     assertEqual(#eventModel.Logs[1].stack, 2, "native and internal RemoteSpy stack frames filtered")
     assertEqual(eventModel.Logs[1].stack[2].name, "C_LootDropHandler", "anonymous parent frame gets a useful name")
     assertEqual(RemoteSpy.Diagnostics.CallsDeduplicated, 1, "direct/namecall pair deduplicated")
+
+    local bufferEvent = newInstance("RemoteEvent")
+    local sourceBuffer = fakeBuffer.fromstring("A\0B")
+    namecallWrapper(bufferEvent, sourceBuffer, { nested = sourceBuffer })
+    local bufferCall = RemoteSpy.CurrentRemotes[bufferEvent].Logs[1]
+    sourceBuffer.bytes = "mutated"
+    assertEqual(fakeBuffer.tostring(bufferCall.args[1]), "A\0B", "top-level buffer snapshot is immutable")
+    assertEqual(fakeBuffer.tostring(bufferCall.args[2].nested), "A\0B", "nested buffer snapshot is immutable")
+    assertEqual(bufferCall.replayable, true, "complete buffer snapshots remain replayable")
+
+    local aggregateEvent = newInstance("RemoteEvent")
+    local aggregateArgs = {}
+
+    for index = 1, 65 do
+        aggregateArgs[index] = fakeBuffer.fromstring(string.rep("x", 64))
+    end
+
+    namecallWrapper(aggregateEvent, unpackValues(aggregateArgs, 1, #aggregateArgs))
+    local aggregateCall = RemoteSpy.CurrentRemotes[aggregateEvent].Logs[1]
+    assertEqual(aggregateCall.replayable, false, "aggregate call byte overflow disables replay")
+    assertEqual(aggregateCall.args[65].__hydroxideCaptureMarker, true, "overflowing buffer becomes a marker")
+    assertEqual(aggregateCall.capturedBytes <= 4096, true, "aggregate captured bytes remain bounded")
+
+    local invalidSnapshotEvent = newInstance("RemoteEvent")
+    local originalFromString = fakeBuffer.fromstring
+    fakeBuffer.fromstring = function()
+        return nil
+    end
+    namecallWrapper(invalidSnapshotEvent, { __type = "buffer", bytes = "valid" })
+    fakeBuffer.fromstring = originalFromString
+    local invalidSnapshotCall = RemoteSpy.CurrentRemotes[invalidSnapshotEvent].Logs[1]
+    assertEqual(invalidSnapshotCall.replayable, false, "invalid buffer snapshot disables replay")
+    assertEqual(
+        invalidSnapshotCall.args[1].__hydroxideCaptureMarker,
+        true,
+        "invalid buffer.fromstring result becomes an explicit marker"
+    )
+
+    local oversizedEvent = newInstance("RemoteEvent")
+    namecallWrapper(oversizedEvent, fakeBuffer.fromstring(string.rep("x", 257)))
+    local oversizedCall = RemoteSpy.CurrentRemotes[oversizedEvent].Logs[1]
+    assertEqual(oversizedCall.replayable, false, "oversized buffer disables unsafe replay")
+    assertEqual(oversizedCall.args[1].__hydroxideCaptureMarker, true, "oversized buffer becomes an explicit marker")
+    assertEqual(oversizedCall.args[1].Size, 257, "oversized buffer marker retains original size")
 
     local fallbackEvent = newInstance("RemoteEvent")
     local callsBeforeRootFallback = originalCalls

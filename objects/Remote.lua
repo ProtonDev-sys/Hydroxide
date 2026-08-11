@@ -1,11 +1,14 @@
 local Remote = {}
 
 local DEFAULT_MAX_LOGS = 500
+local DEFAULT_MAX_HISTORY_BYTES = 16777216
 
-local function createLogBuffer(capacity)
+local function createLogBuffer(capacity, byteCapacity)
     local storage = {}
+    local sizes = {}
     local head = 1
     local count = 0
+    local storedBytes = 0
     local methods = {}
     local proxy = {}
 
@@ -13,16 +16,71 @@ local function createLogBuffer(capacity)
         return ((head + logicalIndex - 2) % capacity) + 1
     end
 
-    function methods.Push(_, value)
-        if count < capacity then
-            count = count + 1
-            storage[physicalIndex(count)] = value
+    local function valueBytes(value)
+        return math.max(0, math.floor(tonumber(type(value) == "table" and value.capturedBytes) or 0))
+    end
+
+    local function popOldest()
+        if count == 0 then
             return nil
         end
 
         local dropped = storage[head]
-        storage[head] = value
+        storedBytes = math.max(0, storedBytes - (sizes[head] or 0))
+        storage[head] = nil
+        sizes[head] = nil
         head = (head % capacity) + 1
+        count = count - 1
+
+        if count == 0 then
+            head = 1
+        end
+
+        return dropped
+    end
+
+    function methods.Push(_, value)
+        local bytes = valueBytes(value)
+        local dropped = 0
+
+        while count > 0 and (count >= capacity or storedBytes + bytes > byteCapacity) do
+            popOldest()
+            dropped = dropped + 1
+        end
+
+        count = count + 1
+        local index = physicalIndex(count)
+        storage[index] = value
+        sizes[index] = bytes
+        storedBytes = storedBytes + bytes
+        return dropped
+    end
+
+    function methods.RefreshBytes(_, target)
+        local found
+
+        for logicalIndex = 1, count do
+            if storage[physicalIndex(logicalIndex)] == target then
+                found = physicalIndex(logicalIndex)
+                break
+            end
+        end
+
+        if not found then
+            return 0
+        end
+
+        local nextBytes = valueBytes(target)
+        storedBytes = math.max(0, storedBytes - (sizes[found] or 0)) + nextBytes
+        sizes[found] = nextBytes
+
+        local dropped = 0
+
+        while count > 1 and storedBytes > byteCapacity do
+            popOldest()
+            dropped = dropped + 1
+        end
+
         return dropped
     end
 
@@ -40,11 +98,18 @@ local function createLogBuffer(capacity)
             return false
         end
 
+        storedBytes = math.max(0, storedBytes - (sizes[physicalIndex(found)] or 0))
+
         for logicalIndex = found, count - 1 do
-            storage[physicalIndex(logicalIndex)] = storage[physicalIndex(logicalIndex + 1)]
+            local index = physicalIndex(logicalIndex)
+            local nextIndex = physicalIndex(logicalIndex + 1)
+            storage[index] = storage[nextIndex]
+            sizes[index] = sizes[nextIndex]
         end
 
-        storage[physicalIndex(count)] = nil
+        local lastIndex = physicalIndex(count)
+        storage[lastIndex] = nil
+        sizes[lastIndex] = nil
         count = count - 1
 
         if count == 0 then
@@ -56,8 +121,14 @@ local function createLogBuffer(capacity)
 
     function methods.Clear()
         storage = {}
+        sizes = {}
         head = 1
         count = 0
+        storedBytes = 0
+    end
+
+    function methods.Bytes()
+        return storedBytes
     end
 
     local function iterate()
@@ -88,6 +159,16 @@ local function createLogBuffer(capacity)
     })
 end
 
+local function normalizeMaxHistoryBytes(value)
+    value = tonumber(value)
+
+    if not value then
+        return DEFAULT_MAX_HISTORY_BYTES
+    end
+
+    return math.max(1, math.floor(value))
+end
+
 local function normalizeMaxLogs(value)
     value = tonumber(value)
 
@@ -106,12 +187,134 @@ local function argumentCount(args)
     return #args
 end
 
-function Remote.new(instance, maxLogs)
+local function normalizeArgumentIndex(index)
+    index = tonumber(index)
+
+    if not index or index ~= index or index == math.huge or index == -math.huge or index < 1 or index % 1 ~= 0 then
+        return nil
+    end
+
+    return index
+end
+
+local function isNaN(value)
+    return type(value) == "number" and value ~= value
+end
+
+local function buffersEqual(left, right)
+    if left == right then
+        return true
+    elseif typeof(left) ~= "buffer" or typeof(right) ~= "buffer" or not buffer then
+        return false
+    elseif type(buffer.len) ~= "function" or type(buffer.readu8) ~= "function" then
+        return false
+    end
+
+    local maximum = 4096
+
+    if oh and oh.Settings then
+        maximum = tonumber(oh.Settings.MaxConditionBufferBytes or oh.Settings.maxConditionBufferBytes) or maximum
+    end
+
+    local ran, matches = pcall(function()
+        local leftLength = buffer.len(left)
+        local rightLength = buffer.len(right)
+
+        if leftLength ~= rightLength or leftLength > maximum then
+            return false
+        end
+
+        for offset = 0, leftLength - 1 do
+            if buffer.readu8(left, offset) ~= buffer.readu8(right, offset) then
+                return false
+            end
+        end
+
+        return true
+    end)
+
+    return ran and matches == true
+end
+
+local function addArgCondition(storage, index, value, byType)
+    index = normalizeArgumentIndex(index)
+
+    if not index then
+        return false, "Argument index must be a positive integer"
+    end
+
+    local condition = storage[index]
+
+    if not condition then
+        condition = {
+            types = {},
+            values = {},
+            nan = false
+        }
+        storage[index] = condition
+    end
+
+    if byType or value == nil then
+        local valueType = byType and value or "nil"
+
+        if type(valueType) ~= "string" or valueType == "" then
+            return false, "Condition type must be a non-empty string"
+        elseif condition.types[valueType] then
+            return false, "Condition already exists"
+        end
+
+        condition.types[valueType] = true
+    elseif isNaN(value) then
+        if condition.nan then
+            return false, "Condition already exists"
+        end
+
+        condition.nan = true
+    else
+        if typeof(value) == "buffer" then
+            for expected in pairs(condition.values) do
+                if typeof(expected) == "buffer" and buffersEqual(expected, value) then
+                    return false, "Condition already exists"
+                end
+            end
+        end
+
+        if condition.values[value] ~= nil then
+            return false, "Condition already exists"
+        end
+
+        condition.values[value] = true
+    end
+
+    return true
+end
+
+local function matchesValues(condition, value)
+    if value == nil then
+        return false
+    elseif isNaN(value) then
+        return condition.nan == true
+    elseif condition.values[value] ~= nil then
+        return true
+    elseif typeof(value) == "buffer" then
+        for expected in pairs(condition.values) do
+            if typeof(expected) == "buffer" and buffersEqual(expected, value) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+function Remote.new(instance, maxLogs, maxHistoryBytes)
     local remote = {}
 
     remote.Instance = instance
     remote.MaxLogs = normalizeMaxLogs(maxLogs)
-    remote.Logs = createLogBuffer(remote.MaxLogs)
+    remote.MaxHistoryBytes = normalizeMaxHistoryBytes(maxHistoryBytes)
+    remote.Logs = createLogBuffer(remote.MaxLogs, remote.MaxHistoryBytes)
+    remote.HistoryBytes = 0
     remote.Calls = 0
     remote.TotalCalls = 0
     remote.DroppedCalls = 0
@@ -131,6 +334,7 @@ function Remote.new(instance, maxLogs)
     remote.AreArgsBlocked = Remote.areArgsBlocked
     remote.AreArgsIgnored = Remote.areArgsIgnored
     remote.IncrementCalls = Remote.incrementCalls
+    remote.RefreshCallBytes = Remote.refreshCallBytes
     remote.DecrementCalls = Remote.decrementCalls
 
     return remote
@@ -141,6 +345,7 @@ function Remote.clear(remote)
     remote.TotalCalls = 0
     remote.DroppedCalls = 0
     remote.Logs:Clear()
+    remote.HistoryBytes = 0
 end
 
 function Remote.setBlocked(remote, blocked)
@@ -168,42 +373,11 @@ function Remote.unignore(remote)
 end
 
 function Remote.blockArg(remote, index, value, byType)
-    local blockedArgs = remote.BlockedArgs
-    local blockedIndex = blockedArgs[index]
-
-    if not blockedIndex then
-        blockedIndex = {
-            types = {},
-            values = {}
-        }
-        blockedArgs[index] = blockedIndex
-    end
-
-    if byType then
-        blockedIndex.types[value] = true
-    else
-        blockedIndex.values[value] = true
-    end
+    return addArgCondition(remote.BlockedArgs, index, value, byType)
 end
 
 function Remote.ignoreArg(remote, index, value, byType)
-    local ignoredArgs = remote.IgnoredArgs
-    local ignoredIndex = ignoredArgs[index]
-
-    if not ignoredIndex then
-        ignoredIndex = {
-            types = {},
-            values = {}
-        }
-
-        ignoredArgs[index] = ignoredIndex
-    end
-
-    if byType then
-        ignoredIndex.types[value] = true
-    else
-        ignoredIndex.values[value] = true
-    end
+    return addArgCondition(remote.IgnoredArgs, index, value, byType)
 end
 
 function Remote.areArgsBlocked(remote, args)
@@ -214,7 +388,7 @@ function Remote.areArgsBlocked(remote, args)
         local indexBlock = blockedArgs[index]
 
         if indexBlock
-            and (indexBlock.types[typeof(value)] or (value ~= nil and indexBlock.values[value] ~= nil))
+            and (indexBlock.types[typeof(value)] or matchesValues(indexBlock, value))
         then
             return true
         end
@@ -231,7 +405,7 @@ function Remote.areArgsIgnored(remote, args)
         local indexIgnore = ignoredArgs[index]
 
         if indexIgnore
-            and (indexIgnore.types[typeof(value)] or (value ~= nil and indexIgnore.values[value] ~= nil))
+            and (indexIgnore.types[typeof(value)] or matchesValues(indexIgnore, value))
         then
             return true
         end
@@ -246,13 +420,26 @@ function Remote.incrementCalls(remote, call)
 
     remote.Calls = remote.Calls + 1
     remote.TotalCalls = remote.TotalCalls + 1
-    local droppedCall = logs:Push(call)
+    local droppedCount = logs:Push(call)
 
-    if droppedCall ~= nil then
-        remote.DroppedCalls = remote.DroppedCalls + 1
-        dropped = true
+    if droppedCount > 0 then
+        remote.DroppedCalls = remote.DroppedCalls + droppedCount
+        dropped = droppedCount
     end
 
+    remote.HistoryBytes = logs:Bytes()
+
+    return dropped
+end
+
+function Remote.refreshCallBytes(remote, call)
+    local dropped = remote.Logs:RefreshBytes(call)
+
+    if dropped > 0 then
+        remote.DroppedCalls = remote.DroppedCalls + dropped
+    end
+
+    remote.HistoryBytes = remote.Logs:Bytes()
     return dropped
 end
 
@@ -260,6 +447,7 @@ function Remote.decrementCalls(remote, call)
     local logs = remote.Logs
     if logs:Remove(call) then
         remote.Calls = math.max(0, remote.Calls - 1)
+        remote.HistoryBytes = logs:Bytes()
     end
 end
 

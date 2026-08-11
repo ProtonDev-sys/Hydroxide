@@ -78,8 +78,13 @@ _G.oh = { Settings = {} }
 _G.typeof = function(value)
 	return type(value) == "table" and rawget(value, "__type") or type(value)
 end
+local bufferToStringCalls = 0
 _G.buffer = {
+	len = function(value)
+		return #value.bytes
+	end,
 	tostring = function(value)
+		bufferToStringCalls = bufferToStringCalls + 1
 		return value.bytes
 	end,
 	fromstring = function(bytes)
@@ -100,6 +105,21 @@ local simpleSource = assert(builder.buildRemoteScript(remote, "FireServer", {
 	"LootDrop_Grab",
 	{ Serial = 160356 },
 }))
+
+local binaryBuffer = buffer.fromstring("A\0\255B")
+compileAndRun(assert(builder.buildRemoteScript(remote, "FireServer", { n = 1, binaryBuffer })))
+assertEqual(buffer.tostring(captured[1]), "A\0\255B", "generated buffer replay preserves binary bytes")
+
+local originalBufferToString = buffer.tostring
+buffer.tostring = function(value)
+	bufferToStringCalls = bufferToStringCalls + 1
+	return value.bytes:sub(1, math.max(0, #value.bytes - 1))
+end
+local mismatchedBufferSource = assert(builder.buildRemoteScript(remote, "FireServer", { n = 1, binaryBuffer }))
+assertContains(mismatchedBufferSource, "length did not match", "mismatched buffer reads are rejected")
+compileAndRun(mismatchedBufferSource)
+assertEqual(captured[1], nil, "mismatched buffer read never fabricates replay bytes")
+buffer.tostring = originalBufferToString
 
 assertEqual(
 	simpleSource,
@@ -255,6 +275,7 @@ _G.oh.Settings.MaxGeneratedTableDepth = 1
 _G.oh.Settings.MaxGeneratedTables = 8
 _G.oh.Settings.MaxGeneratedStringBytes = 256
 _G.oh.Settings.MaxGeneratedBufferBytes = 256
+bufferToStringCalls = 0
 
 local wide = {}
 
@@ -281,6 +302,7 @@ assertContains(limitedSource, "truncated after 8 entries", "entry limit warning"
 assertContains(limitedSource, "depth limit", "depth limit warning")
 assertContains(limitedSource, "string exceeds", "string limit warning")
 assertContains(limitedSource, "buffer exceeds", "buffer limit warning")
+assertEqual(bufferToStringCalls, 0, "oversized buffer is rejected before tostring copies it")
 compileAndRun(limitedSource)
 assertEqual(captured[3].safe, true, "raw next bypasses hostile __pairs")
 assertEqual(captured[4], nil, "oversized string becomes nil")

@@ -22,6 +22,20 @@ getgenv().HydroxideConfig = {
     maxGeneratedBufferBytes = 65536,
     maxGeneratedOutputBytes = 1048576,
     maxInspectorBytes = 524288,
+    maxFunctionSourceCacheEntries = 64,
+    maxFunctionSourceCacheBytes = 2097152,
+    maxConditionBufferBytes = 4096,
+    maxCapturedCallBytes = 262144,
+    maxCapturedArguments = 128,
+    maxRemoteHistoryBytes = 16777216,
+    maxClosureHistoryBytes = 16777216,
+    maxScriptRows = 750,
+    maxModuleRows = 750,
+    maxModuleFunctions = 32,
+    maxRakNetLogs = 500,
+    maxRakNetPacketBytes = 65536,
+    maxRakNetHistoryBytes = 4194304,
+    maxRakNetGeneratedOutputBytes = 1048576,
     maxConcurrentImports = 6
 }
 
@@ -79,18 +93,20 @@ This fork targets the current [Potassium API reference](https://docs.potassium.p
 
 * `filtergc` narrows scanner work to non-executor Lua closures instead of walking every GC object.
 * `getrunningscripts` powers Script Scanner for running `LocalScript` and client-context `Script` instances without a GC scan.
+* `getscriptclosure` and `getsenv` provide the same lazy closure, environment, proto, constant, function, and source inspection for both running scripts and loaded modules.
 * `hookmetamethod` captures ordinary namecalls on their original thread for caller filtering and stack/source inspection. Potassium's `oth.hook`, `oth.get_root_callback`, `oth.get_original_thread`, and `oth.unhook(target)` provide the direct C-function pass-through, with `hookfunction` retained as a fallback.
 * `getscriptfromthread` preserves calling-script attribution for off-thread hooks.
+* `raknet.add_send_hook`, `raknet.add_receive_hook`, their matching remove functions, and `raknet.send` power a bounded transport-level RakNet inspector when RakNet is enabled in Potassium's own settings. Potassium warns that this facility can carry ban risk; Hydroxide does not enable it automatically.
 * `debug.getcallstack` captures bounded call stacks for remote and closure calls when the active hook runs on the original thread.
 * `decompile` powers lazy script, module, and function source inspection without slowing initial UI loading.
 * `restorefunction` and documented `Connection:Enable()` teardown restore hooks and temporarily disabled error connections.
 * `getthreadidentity` and `setthreadidentity` capture the launch identity and restore it around privileged inspection work, replacing legacy thread-context names internally.
 
-Remote and closure histories use fixed-capacity circular buffers, while visible call rows are rendered in a smaller window to keep high-traffic sessions responsive. Every matching call is still counted and logged into that bounded history, while expensive stack snapshots use a token-bucket limit (`maxStackCapturesPerSecond`, default 60) so remote spam cannot stall the client; calls skipped by that safeguard are labelled in the inspector. Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. The main Hydroxide window expands to the available viewport, and RemoteSpy/ClosureSpy call logs expose built-in inspector action strips for arguments, returns, cleaned call chains, caller and target functions, decompiled scripts, paths, replay code, confirmed replay calls, diagnostics, and hex previews. Inspector output opens inside the Hydroxide menu instead of modal source popups, and very large inspector panes are capped by `MaxInspectorBytes` (default 512 KB) to keep the UI responsive. Script Scanner builds only the visible detail list, while Upvalue Scanner refreshes visible results in bounded round-robin batches instead of rescanning every closure every frame. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, `captureExecutorCalls = false` to hide RemoteSpy calls unless they are confirmed to come from a game thread, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
+Remote and closure histories use fixed-capacity circular buffers plus aggregate per-call and per-tool byte budgets, so many individually valid buffers cannot exhaust memory. Visible call rows are rendered newest-first in a smaller window to keep high-traffic sessions responsive. The list follows new calls only while it is pinned to the top, so manual inspection does not get pulled away. Every matching call is still counted and logged into that bounded history, while expensive stack snapshots use a token-bucket limit (`maxStackCapturesPerSecond`, default 60) so remote spam cannot stall the client; calls skipped by that safeguard are labelled in the inspector. Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. The main Hydroxide window opens immediately, expands to the available viewport, and RemoteSpy/ClosureSpy call logs expose compact inspector action strips for arguments, returns, cleaned call chains, caller and target functions, decompiled scripts, paths, replay code, confirmed replay calls, diagnostics, and string/buffer hex previews. Inspector output is read-only and opens inside the Hydroxide menu instead of modal source popups; it can expand for long function data, and very large output is capped by `MaxInspectorBytes` (default 512 KB). Script and Module scanners wait until their tab is first opened, then use full-width detail views, cancellable row batches, bounded background workers, and no hidden-tab scan or metadata work. Function-source caches have aggregate entry and byte eviction limits. Module sections expose source, environment, functions, protos, constants, per-function metadata/source, and an Enter-to-apply filter for reaching relevant entries without rendering an unbounded list. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, `captureExecutorCalls = false` to hide RemoteSpy calls unless they are confirmed to come from a game thread, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
 
-Click a captured RemoteSpy or ClosureSpy call to enable the inspector actions; right-click still opens the same actions as a shortcut. RemoteSpy replay generation opens an editable code viewer, while **Copy Code** copies the generated source. It preserves packed nils, shared and cyclic tables, binary strings, non-finite numbers, and safe Instance paths; values that cannot be reconstructed are explicitly warned about and omitted instead of producing broken code. Generation is bounded by the table, depth, string, buffer, and output limits above. Live replay requires confirmation, and an intentionally blocked remote must be unblocked first. Click a Module Scanner row to view the module's decompiled source; Script Scanner rows now populate source, environment, proto, and constant panes lazily, and function rows open their metadata, environment, constants, protos, upvalues, hash, and decompiled source in the same menu panel.
+Click a captured RemoteSpy or ClosureSpy call to enable the inspector actions; right-click still opens the same actions as a shortcut. RemoteSpy replay generation opens a read-only code viewer, while **Copy Code** copies the generated source. It preserves packed nils, shared and cyclic tables, binary strings and buffers, non-finite numbers, and safe Instance paths; values that cannot be reconstructed are explicitly marked and replay is disabled instead of emitting misleading code. Generation is bounded by the table, depth, string, buffer, and output limits above. Live replay uses an in-menu confirmation, and an intentionally blocked remote must be unblocked first. Conditions default to the selected argument and a safe type match, include buffer/current Roblox value types, validate indices, and retain an advanced typed-value option.
 
-Upvalue Scanner's **Generate Script** action now opens a validated, editable fork-only script instead of silently copying a fragile snippet. The generated script uses the current Potassium debug aliases, verifies the closure and table target before mutation, and refuses identity-based table/function/thread keys that cannot be replayed safely.
+Upvalue Scanner's **Generate Script** action opens a validated, read-only fork-only script instead of silently copying a fragile snippet. The generated script uses the current Potassium debug aliases, verifies the closure and table target before mutation, and refuses identity-based table/function/thread keys that cannot be replayed safely.
 
 The loader defaults to `ProtonDev-sys/Hydroxide` on `potassium-modernization-fork`. Override `owner`, `repository`, or `branch` in `HydroxideConfig` when testing another fork or commit.
 
@@ -117,13 +133,18 @@ Report issues in [ProtonDev-sys/Hydroxide](https://github.com/ProtonDev-sys/Hydr
     * View general information of scripts (source, environment, protos, constants, etc.)
     * Retrieve protos from running client `BaseScript` instances
 * Module Scanner
-    * Browse loaded ModuleScripts and view their complete decompiled source
+    * Inspect loaded ModuleScripts with the same source, environment, function, proto, and constant tooling as running scripts
 * RemoteSpy
     * Log calls of remote objects (RemoteEvent, UnreliableRemoteEvent, RemoteFunction, BindableEvent, BindableFunction)
     * Inspect call stacks, calling functions, calling scripts, decompiled source, replay state, and return/error status when supported
-    * Generate editable replay scripts with nil argument, Instance path, shared table, and cyclic table handling
+    * Generate read-only replay scripts with nil argument, Instance path, shared table, cyclic table, and buffer handling
     * Ignore/Block calls based on parameters passed
     * Traceback calling function/closure
+* RakNet Spy (Potassium)
+    * Log bounded outgoing and incoming RakNet packet snapshots without retaining live packet objects
+    * Inspect packet metadata plus capped hex, text, and array payload views
+    * Generate compact outgoing send scripts and clearly labelled incoming receive-hook templates
+    * Replay only complete outgoing captures after an in-menu confirmation
 * ClosureSpy
     * Log calls of closures
     * View general information of closures (location, protos, constants, etc.)

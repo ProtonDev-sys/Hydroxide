@@ -112,12 +112,17 @@ function ActionPanel.Install(container, results, options)
 		return nil
 	end
 
-	local columns = math.max(1, math.floor(tonumber(options.Columns) or 5))
+	local maximumColumns = math.max(1, math.floor(tonumber(options.Columns) or 5))
 	local buttonWidth = math.max(72, math.floor(tonumber(options.ButtonWidth) or DEFAULT_BUTTON_WIDTH))
 	local buttonHeight = math.max(20, math.floor(tonumber(options.ButtonHeight) or DEFAULT_BUTTON_HEIGHT))
 	local gap = math.max(2, math.floor(tonumber(options.Gap) or DEFAULT_GAP))
+	local minimumCellWidth = math.max(72, math.floor(tonumber(options.MinimumCellWidth) or buttonWidth))
+	local originalResultsPosition = results.Position
+	local originalResultsSize = results.Size
+	local columns = maximumColumns
 	local rows = math.ceil(#actions / columns)
-	local actionHeight = rows * buttonHeight + math.max(0, rows - 1) * gap
+	local contentHeight = rows * buttonHeight + math.max(0, rows - 1) * gap
+	local actionHeight = contentHeight + 5
 	local toolbarHeight = ACTIONS_TOP + actionHeight + 2
 	local toolbar = makeToolbar(results, toolbarHeight)
 
@@ -125,24 +130,48 @@ function ActionPanel.Install(container, results, options)
 		return nil
 	end
 
-	local actionsFrame = Instance.new("Frame")
+	local actionsFrame = Instance.new("ScrollingFrame")
 	actionsFrame.Name = "InspectorActions"
+	actionsFrame.Active = true
 	actionsFrame.BackgroundTransparency = 1
 	actionsFrame.BorderSizePixel = 0
+	actionsFrame.BottomImage = ""
+	actionsFrame.CanvasPosition = Vector2.new()
+	actionsFrame.CanvasSize = UDim2.new()
 	actionsFrame.ClipsDescendants = true
+	actionsFrame.MidImage = ""
 	actionsFrame.Position = UDim2.new(0, 0, 0, ACTIONS_TOP)
+	actionsFrame.ScrollBarImageColor3 = Color3.fromRGB(92, 92, 92)
+	actionsFrame.ScrollBarThickness = 4
+	actionsFrame.ScrollingDirection = Enum.ScrollingDirection.X
 	actionsFrame.Size = UDim2.new(1, 0, 0, actionHeight)
+	actionsFrame.TopImage = ""
 	actionsFrame.ZIndex = toolbar.ZIndex + 1
 	actionsFrame.Parent = toolbar
 
 	local layout = Instance.new("UIGridLayout")
 	layout.CellPadding = UDim2.new(0, gap, 0, gap)
-	layout.CellSize = UDim2.new(1 / columns, -gap * (columns - 1) / columns, 0, buttonHeight)
+	layout.CellSize = UDim2.new(0, minimumCellWidth, 0, buttonHeight)
 	layout.FillDirection = Enum.FillDirection.Horizontal
 	layout.FillDirectionMaxCells = columns
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.StartCorner = Enum.StartCorner.TopLeft
 	layout.Parent = actionsFrame
+
+	local function updateLayout()
+		local width = actionsFrame.AbsoluteSize.X
+
+		if width > 0 then
+			local fittedWidth = math.floor((width - gap * (columns - 1)) / columns)
+			local cellWidth = math.max(minimumCellWidth, fittedWidth)
+			local canvasWidth = columns * cellWidth + math.max(0, columns - 1) * gap
+			layout.CellSize = UDim2.new(0, cellWidth, 0, buttonHeight)
+			actionsFrame.CanvasSize = UDim2.new(0, math.max(width, canvasWidth), 0, contentHeight)
+		end
+	end
+
+	trackConnection(actionsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateLayout))
+	task.defer(updateLayout)
 
 	local panel = {
 		Buttons = {},

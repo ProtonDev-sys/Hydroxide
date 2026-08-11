@@ -42,7 +42,21 @@ local runtimeSettings = {
     MaxGeneratedStringBytes = numberSetting("maxGeneratedStringBytes", 65536, 256, 1048576),
     MaxGeneratedBufferBytes = numberSetting("maxGeneratedBufferBytes", 65536, 256, 1048576),
     MaxGeneratedOutputBytes = numberSetting("maxGeneratedOutputBytes", 1048576, 16384, 8388608),
-    MaxInspectorBytes = numberSetting("maxInspectorBytes", 524288, 8192, 8388608)
+    MaxInspectorBytes = numberSetting("maxInspectorBytes", 524288, 8192, 8388608),
+    MaxFunctionSourceCacheEntries = numberSetting("maxFunctionSourceCacheEntries", 64, 1, 256),
+    MaxFunctionSourceCacheBytes = numberSetting("maxFunctionSourceCacheBytes", 2097152, 32768, 16777216),
+    MaxConditionBufferBytes = numberSetting("maxConditionBufferBytes", 4096, 64, 65536),
+    MaxCapturedCallBytes = numberSetting("maxCapturedCallBytes", 262144, 4096, 8388608),
+    MaxCapturedArguments = numberSetting("maxCapturedArguments", 128, 8, 1024),
+    MaxRemoteHistoryBytes = numberSetting("maxRemoteHistoryBytes", 16777216, 65536, 268435456),
+    MaxClosureHistoryBytes = numberSetting("maxClosureHistoryBytes", 16777216, 65536, 268435456),
+    MaxScriptRows = numberSetting("maxScriptRows", 750, 50, 2000),
+    MaxModuleRows = numberSetting("maxModuleRows", 750, 50, 2000),
+    MaxModuleFunctions = numberSetting("maxModuleFunctions", 32, 1, 128),
+    MaxRakNetLogs = numberSetting("maxRakNetLogs", 500, 25, 5000),
+    MaxRakNetPacketBytes = numberSetting("maxRakNetPacketBytes", 65536, 256, 16777216),
+    MaxRakNetHistoryBytes = numberSetting("maxRakNetHistoryBytes", 4194304, 65536, 67108864),
+    MaxRakNetGeneratedOutputBytes = numberSetting("maxRakNetGeneratedOutputBytes", 1048576, 1024, 8388608)
 }
 
 local function pick(...)
@@ -131,6 +145,7 @@ end
 local rawGetMetatable = pick(getrawmetatable, debug.getmetatable)
 local othLibrary = pick(environment.oth, oth)
 local httpLibrary = pick(environment.http, http)
+local raknetLibrary = pick(environment.raknet, raknet)
 local canonicalMethods = {
     checkcaller = pick(checkcaller, environment.checkcaller),
     newcclosure = pick(newcclosure, environment.newcclosure),
@@ -143,7 +158,7 @@ local canonicalMethods = {
 	getcallstack = pick(debug.getcallstack, getcallstack, environment.getcallstack),
     getinfo = pick(debug.getinfo, getinfo),
     getsenv = pick(getsenv, environment.getsenv),
-    getmenv = pick(getsenv, getmenv),
+    getmenv = pick(getmenv, environment.getmenv, getsenv, environment.getsenv),
     gettenv = pick(gettenv, environment.gettenv),
     getthreadidentity = pick(
         getthreadidentity,
@@ -210,7 +225,12 @@ local canonicalMethods = {
     oth_unhook = othLibrary and othLibrary.unhook,
     oth_get_root_callback = othLibrary and othLibrary.get_root_callback,
     oth_get_original_thread = othLibrary and othLibrary.get_original_thread,
-    oth_is_hook_thread = othLibrary and othLibrary.is_hook_thread
+    oth_is_hook_thread = othLibrary and othLibrary.is_hook_thread,
+    raknet_add_send_hook = raknetLibrary and raknetLibrary.add_send_hook,
+    raknet_remove_send_hook = raknetLibrary and raknetLibrary.remove_send_hook,
+    raknet_add_receive_hook = raknetLibrary and raknetLibrary.add_receive_hook,
+    raknet_remove_receive_hook = raknetLibrary and raknetLibrary.remove_receive_hook,
+    raknet_send = raknetLibrary and raknetLibrary.send
 }
 
 canonicalMethods.hookmetamethod = makeHookMetaMethod(canonicalMethods.getrawmetatable)
@@ -435,7 +455,12 @@ local globalMethods = {
     othUnhook = canonicalMethods.oth_unhook,
     othGetRootCallback = canonicalMethods.oth_get_root_callback,
     othGetOriginalThread = canonicalMethods.oth_get_original_thread,
-    othIsHookThread = canonicalMethods.oth_is_hook_thread
+    othIsHookThread = canonicalMethods.oth_is_hook_thread,
+    raknetAddSendHook = canonicalMethods.raknet_add_send_hook,
+    raknetRemoveSendHook = canonicalMethods.raknet_remove_send_hook,
+    raknetAddReceiveHook = canonicalMethods.raknet_add_receive_hook,
+    raknetRemoveReceiveHook = canonicalMethods.raknet_remove_receive_hook,
+    raknetSend = canonicalMethods.raknet_send
 }
 
 globalMethods.checkCaller = globalMethods.checkcaller
@@ -487,6 +512,11 @@ globalMethods.writeFile = globalMethods.writefile
 globalMethods.makeFolder = globalMethods.makefolder
 globalMethods.isFolder = globalMethods.isfolder
 globalMethods.isFile = globalMethods.isfile
+globalMethods.raknet_add_send_hook = globalMethods.raknetAddSendHook
+globalMethods.raknet_remove_send_hook = globalMethods.raknetRemoveSendHook
+globalMethods.raknet_add_receive_hook = globalMethods.raknetAddReceiveHook
+globalMethods.raknet_remove_receive_hook = globalMethods.raknetRemoveReceiveHook
+globalMethods.raknet_send = globalMethods.raknetSend
 
 local function httpGet(url)
     local requestFn = globalMethods.request
@@ -622,6 +652,125 @@ end
 
 globalMethods.restoreHook = restoreHookRecord
 
+local function createFunctionSourceCacheBudget(maximumEntries, maximumBytes)
+    local budget = {
+        Bytes = 0,
+        Entries = 0,
+        Head = 1,
+        MaximumBytes = maximumBytes,
+        MaximumEntries = maximumEntries,
+        Order = {},
+        Tail = 0
+    }
+
+    function budget:TrimOrder()
+        while self.Head <= self.Tail do
+            local token = self.Order[self.Head]
+
+            if token and token.Active then
+                break
+            end
+
+            self.Order[self.Head] = nil
+            self.Head = self.Head + 1
+        end
+
+        if self.Head > self.Tail then
+            self.Order = {}
+            self.Head = 1
+            self.Tail = 0
+        elseif (self.Head > 128 and self.Head > self.Tail / 2)
+            or (self.Tail > 128 and self.Tail > math.max(128, self.Entries * 2))
+        then
+            local compacted = {}
+
+            for index = self.Head, self.Tail do
+                local retained = self.Order[index]
+
+                if retained and retained.Active then
+                    compacted[#compacted + 1] = retained
+                end
+            end
+
+            self.Order = compacted
+            self.Head = 1
+            self.Tail = #compacted
+        end
+    end
+
+    function budget:Release(token, evict)
+        if type(token) ~= "table" or token.Active ~= true then
+            return
+        end
+
+        token.Active = false
+        self.Bytes = math.max(0, self.Bytes - (tonumber(token.Bytes) or 0))
+        self.Entries = math.max(0, self.Entries - 1)
+        local evictCallback = token.Evict
+        token.Evict = nil
+
+        if evict and type(evictCallback) == "function" then
+            pcall(evictCallback)
+        end
+
+        self:TrimOrder()
+    end
+
+    function budget:Reserve(bytes, evict)
+        bytes = math.max(0, math.floor(tonumber(bytes) or 0))
+
+        if bytes > self.MaximumBytes then
+            return nil
+        end
+
+        local token = {
+            Active = true,
+            Bytes = bytes,
+            Evict = evict
+        }
+        self.Tail = self.Tail + 1
+        self.Order[self.Tail] = token
+        self.Bytes = self.Bytes + bytes
+        self.Entries = self.Entries + 1
+
+        while self.Entries > self.MaximumEntries or self.Bytes > self.MaximumBytes do
+            self:TrimOrder()
+            local oldest = self.Order[self.Head]
+
+            if oldest and oldest.Active then
+                self:Release(oldest, true)
+            else
+                break
+            end
+        end
+
+        self:TrimOrder()
+
+        return token.Active and token or nil
+    end
+
+    function budget:Clear()
+        while self.Entries > 0 do
+            self:TrimOrder()
+            local token = self.Order[self.Head]
+
+            if not token then
+                break
+            end
+
+            self:Release(token, true)
+        end
+
+        self.Order = {}
+        self.Head = 1
+        self.Tail = 0
+        self.Bytes = 0
+        self.Entries = 0
+    end
+
+    return budget
+end
+
 local executorName = "Unknown"
 local executorVersion = "Unknown"
 
@@ -651,6 +800,10 @@ environment.oh = {
     Cache = importCache,
     Methods = globalMethods,
     Settings = runtimeSettings,
+    FunctionSourceCache = createFunctionSourceCacheBudget(
+        runtimeSettings.MaxFunctionSourceCacheEntries,
+        runtimeSettings.MaxFunctionSourceCacheBytes
+    ),
     Runtime = {
         Name = executorName,
         Version = executorVersion,
@@ -734,6 +887,12 @@ environment.oh = {
         if assets and assets[1] then
             pcall(function()
                 assets[1]:Destroy()
+            end)
+        end
+
+        if runtime.FunctionSourceCache and runtime.FunctionSourceCache.Clear then
+            pcall(function()
+                runtime.FunctionSourceCache:Clear()
             end)
         end
 

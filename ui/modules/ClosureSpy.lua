@@ -37,7 +37,8 @@ local ClosureLogs = Page.Logs
 local LogsButtons = ClosureLogs.Buttons
 local LogsClosure = ClosureLogs.ClosureObject
 local LogsBack = ClosureLogs.Back
-local LogsResults = ClosureLogs.Results.Clip.Content
+local LogsClip = ClosureLogs.Results.Clip
+local LogsResults = LogsClip.Content
 
 local ClosureConditions = Page.Conditions
 local ConditionsClosure = ClosureConditions.ClosureObject
@@ -87,6 +88,21 @@ local conditionStatus = Dropdown.new(NewConditionContent.Status)
 local conditionType = Dropdown.new(NewConditionContent.Type)
 local conditionValueType = Dropdown.new(NewConditionContent.ValueType)
 
+for _, valueType in ipairs({
+	"nil", "string", "number", "boolean", "table", "function", "thread", "buffer", "Instance", "EnumItem",
+	"BrickColor", "CFrame", "Color3", "Vector2", "Vector2int16", "Vector3", "Vector3int16", "UDim", "UDim2", "Rect", "Ray", "Region3", "Region3int16",
+	"NumberRange", "NumberSequence", "NumberSequenceKeypoint", "ColorSequence", "ColorSequenceKeypoint",
+	"DateTime", "TweenInfo", "PhysicalProperties", "PathWaypoint", "RaycastParams", "OverlapParams", "Font",
+	"Content", "SharedTable", "Axes", "Faces", "Random",
+}) do
+	conditionType:AddOption(valueType, oh.Constants.Types[valueType] or oh.Constants.Types.userdata)
+end
+
+conditionStatus:AddOption("Ignore", icons.ignore)
+conditionStatus:AddOption("Block", icons.block)
+conditionValueType:AddOption("Type")
+conditionValueType:AddOption("Value")
+
 local closureList = List.new(ListResults, true)
 local hookLogs = List.new(LogsResults)
 local closureConditions = List.new(ConditionsResults, true)
@@ -94,11 +110,106 @@ local closureConditions = List.new(ConditionsResults, true)
 local currentLogs = {}
 local removed = {}
 
-local selected = {
-	logs = {},
-	conditions = {},
-}
+local selected = {}
+local selectedLogTargets = {}
+local selectedConditionTargets = {}
 local updateCallInspector
+
+local function collectSelectedLogs()
+	local targets = {}
+	local seen = {}
+
+	for _, listButton in ipairs(closureList.Selected or {}) do
+		local log = listButton.Log
+		local instance = listButton.Instance
+
+		if
+			log
+			and not seen[log]
+			and instance
+			and instance.Parent
+			and closureList.Buttons[instance] == listButton
+			and currentLogs[log.Hook] == log
+		then
+			seen[log] = true
+			targets[#targets + 1] = log
+		end
+	end
+
+	return targets
+end
+
+local function collectSelectedConditions()
+	local targets = {}
+	local seen = {}
+	local currentHook = selected.conditionLog and selected.conditionLog.Hook
+
+	for _, listButton in ipairs(closureConditions.Selected or {}) do
+		local condition = listButton.Condition
+		local instance = listButton.Instance
+
+		if
+			condition
+			and not seen[condition]
+			and currentHook
+			and condition.Closure == currentHook
+			and instance
+			and instance.Parent
+			and closureConditions.Buttons[instance] == listButton
+		then
+			seen[condition] = true
+			targets[#targets + 1] = condition
+		end
+	end
+
+	return targets
+end
+
+local function consumeSelectedLogs()
+	local targets = selectedLogTargets
+	selectedLogTargets = {}
+	local valid = {}
+
+	for _, log in ipairs(targets) do
+		local button = log and log.Button
+		local instance = button and button.Instance
+
+		if
+			instance
+			and instance.Parent
+			and closureList.Buttons[instance] == button
+			and currentLogs[log.Hook] == log
+		then
+			valid[#valid + 1] = log
+		end
+	end
+
+	return valid
+end
+
+local function consumeSelectedConditions()
+	local targets = selectedConditionTargets
+	selectedConditionTargets = {}
+	local valid = {}
+	local currentHook = selected.conditionLog and selected.conditionLog.Hook
+
+	for _, condition in ipairs(targets) do
+		local button = condition and condition.Button
+		local instance = button and button.Instance
+
+		if
+			currentHook
+			and condition.Closure == currentHook
+			and instance
+			and instance.Parent
+			and closureConditions.Buttons[instance] == button
+		then
+			valid[#valid + 1] = condition
+		end
+	end
+
+	return valid
+end
 
 local conditionContext = ContextMenuButton.new("rbxassetid://4891633802", "Call Conditions")
 local clearContext = ContextMenuButton.new("rbxassetid://4892169181", "Clear Calls")
@@ -152,9 +263,57 @@ local closureConditionMenuSelected = ContextMenu.new({ removeConditionContextSel
 
 local queuedLogRenders = {}
 local queuedCountUpdates = {}
+local countUpdateQueued = false
+local dirtyLogRenders = {}
 local renderedCallLog
 local renderedCallButtons = {}
 local detailsGeneration = 0
+local activeViewer
+local alive = true
+
+local function uiAlive()
+	return alive and Page ~= nil and Page.Parent ~= nil
+end
+
+local lifecycle = {
+	Connected = true,
+}
+
+function lifecycle:Disconnect()
+	if not self.Connected then
+		return
+	end
+
+	self.Connected = false
+	alive = false
+	detailsGeneration = detailsGeneration + 1
+	selected.args = nil
+	selected.callingScript = nil
+	selected.func = nil
+	selected.callInfo = nil
+	selected.callPodButton = nil
+	selected.hookLog = nil
+	selected.logContext = nil
+	selected.conditionLog = nil
+	selected.condition = nil
+	selectedLogTargets = {}
+	selectedConditionTargets = {}
+	queuedLogRenders = {}
+	queuedCountUpdates = {}
+	dirtyLogRenders = {}
+	countUpdateQueued = false
+
+	local viewer = activeViewer
+	activeViewer = nil
+
+	if viewer then
+		pcall(TextViewer.Hide, viewer)
+	end
+
+	pcall(Methods.SetEvent, nil)
+end
+
+oh.Events[#oh.Events + 1] = lifecycle
 
 local function getMaxRenderedLogs()
 	local settings = oh.Settings or {}
@@ -200,23 +359,71 @@ local function selectedCallAlive()
 end
 
 local function guardSelectedCall(title)
-	if selectedCallAlive() then
+	if uiAlive() and Page.Visible and selectedCallAlive() then
 		return true
 	end
 
 	clearSelectedCall()
 	detailsGeneration = detailsGeneration + 1
-	TextViewer.Show(title or "No Call Selected", "Select a captured call to inspect.")
+
+	if uiAlive() and Page.Visible then
+		local generation = detailsGeneration
+		local viewer
+		viewer = TextViewer.Show(title or "No Call Selected", "Select a captured call to inspect.", {
+			OnHide = function(hiddenViewer)
+				if activeViewer == hiddenViewer then
+					activeViewer = nil
+				end
+
+				if generation == detailsGeneration then
+					detailsGeneration = detailsGeneration + 1
+				end
+			end,
+		})
+		activeViewer = viewer
+	end
+
 	return false
 end
 
 local function renderDetails(title, text, options)
-	TextViewer.Show(title, text, options)
+	if not uiAlive() or not Page.Visible then
+		return nil
+	end
+
+	local generation = detailsGeneration
+	local viewerOptions = {}
+
+	for name, value in pairs(type(options) == "table" and options or {}) do
+		viewerOptions[name] = value
+	end
+
+	local onHide = viewerOptions.OnHide
+	viewerOptions.OnHide = function(viewer)
+		if activeViewer == viewer then
+			activeViewer = nil
+		end
+
+		if generation == detailsGeneration then
+			detailsGeneration = detailsGeneration + 1
+		end
+
+		if type(onHide) == "function" then
+			pcall(onHide, viewer)
+		end
+	end
+	local viewer = TextViewer.Show(title, text, viewerOptions)
+	activeViewer = viewer
+	return viewer
 end
 
 local function showDetails(title, text, options)
+	if not uiAlive() or not Page.Visible then
+		return nil
+	end
+
 	detailsGeneration = detailsGeneration + 1
-	renderDetails(title, text, options)
+	return renderDetails(title, text, options)
 end
 
 local function showDetailsAsync(title, loadingText, callback, options)
@@ -228,12 +435,22 @@ local function showDetailsAsync(title, loadingText, callback, options)
 	local generation = detailsGeneration
 	local call = selected.callInfo
 	renderDetails(title, loadingText)
+	local function requestIsActive()
+		return uiAlive()
+			and Page.Visible
+			and generation == detailsGeneration
+			and selected.callInfo == call
+	end
 
 	task.spawn(function()
+		if not requestIsActive() then
+			return
+		end
+
 		local text
 
 		local function inspect()
-			local ran, result = pcall(callback, call)
+			local ran, result = pcall(callback, call, requestIsActive)
 			text = ran and result or ("Inspector failed: " .. tostring(result))
 		end
 
@@ -249,7 +466,7 @@ local function showDetailsAsync(title, loadingText, callback, options)
 			text = "Inspector failed: " .. tostring(inspectError)
 		end
 
-		if generation == detailsGeneration and selected.callInfo == call then
+		if requestIsActive() then
 			renderDetails(title, text or "No inspection data was returned.", options)
 		end
 	end)
@@ -376,21 +593,31 @@ local function describePackedValues(title, values)
 	return table.concat(lines, "\n")
 end
 
-local function describeFunction(func)
+local function describeFunction(func, isAlive)
 	return FunctionInspector.DescribeFunction(func, {
 		Summarize = argumentSummary,
 		GetPath = safeInstancePath,
+		IsAlive = isAlive,
 	})
 end
 
-local function describeStackFunctions(call)
+local function describeStackFunctions(call, isAlive)
 	return FunctionInspector.DescribeStack(call and call.stack, {
 		Summarize = argumentSummary,
 		GetPath = safeInstancePath,
+		IsAlive = isAlive,
 	})
 end
 
-local function describeScript(scriptInstance)
+local function describeScript(scriptInstance, isAlive)
+	local function inspectionIsActive()
+		return type(isAlive) ~= "function" or isAlive()
+	end
+
+	if not inspectionIsActive() then
+		return "Calling-script inspection was cancelled."
+	end
+
 	if typeof(scriptInstance) ~= "Instance" then
 		return "No calling script was captured for this call."
 	end
@@ -400,10 +627,25 @@ local function describeScript(scriptInstance)
 	lines[#lines + 1] = "Class: " .. scriptInstance.ClassName
 	lines[#lines + 1] = "Path: " .. (safeInstancePath(scriptInstance) or "unavailable")
 
-	if type(decompile) == "function" then
+	if type(decompile) == "function" and inspectionIsActive() then
 		local decompiled, source = pcall(decompile, scriptInstance)
 
+		if not inspectionIsActive() then
+			return "Calling-script inspection was cancelled."
+		end
+
 		if decompiled and type(source) == "string" and source ~= "" then
+			local settings = oh and oh.Settings or {}
+			local maximum = math.max(
+				8192,
+				math.min(8388608, math.floor(tonumber(settings.MaxInspectorBytes or settings.maxInspectorBytes) or 524288))
+			)
+			local marker = "\n-- ... source truncated by the inspector safety limit ..."
+
+			if #source > maximum then
+				source = source:sub(1, math.max(0, maximum - #marker)) .. marker
+			end
+
 			lines[#lines + 1] = ""
 			lines[#lines + 1] = "-- Decompiled source"
 			lines[#lines + 1] = source
@@ -531,7 +773,7 @@ local function hasSelectedCall()
 end
 
 updateCallInspector = function()
-	if not callInspector then
+	if not uiAlive() or not callInspector then
 		return
 	end
 
@@ -614,6 +856,17 @@ local function checkCurrentBlocked()
 end
 
 local Condition = {}
+local function conditionIsNaN(value)
+	return type(value) == "number" and value ~= value
+end
+
+local function conditionBranchIsEmpty(branch)
+	return branch
+		and next(branch.types) == nil
+		and next(branch.values) == nil
+		and branch.nan ~= true
+end
+
 function Condition.new(closure, status, index, value, type)
 	local condition = {}
 	local instance = Assets.ConditionPod:Clone()
@@ -623,9 +876,11 @@ function Condition.new(closure, status, index, value, type)
 	local check = CheckBox.new(content.Toggle)
 	local valueType = type or typeof(value)
 	local typeIcons = oh.Constants.Types
-	local branch = (status == "Ignore" and closure.IgnoredArgs[index]) or closure.BlockedArgs[index]
+	local storage = status == "Ignore" and closure.IgnoredArgs or closure.BlockedArgs
+	local branch = storage[index]
 
 	condition.Branch = branch
+	condition.Storage = storage
 	condition.Status = status
 	condition.Index = index
 	condition.Value = value
@@ -634,6 +889,7 @@ function Condition.new(closure, status, index, value, type)
 	condition.Enabled = true
 	condition.Instance = instance
 	condition.Button = button
+	button.Condition = condition
 	condition.Toggle = Condition.toggle
 	condition.Remove = Condition.remove
 
@@ -645,9 +901,9 @@ function Condition.new(closure, status, index, value, type)
 		selected.condition = condition
 	end)
 
-	button:SetSelectedCallback(function()
-		if not table.find(selected.conditions, condition) then
-			table.insert(selected.conditions, condition)
+	instance.MouseButton2Click:Connect(function()
+		if uiAlive() then
+			selectedConditionTargets = collectSelectedConditions()
 		end
 	end)
 
@@ -668,30 +924,50 @@ function Condition.toggle(condition)
 
 	local index = condition.Index
 	local value = condition.Value
-	local closure = condition.Closure
-	local ignoredArgs = closure.IgnoredArgs[index]
-	local blockedArgs = closure.BlockedArgs[index]
-	local argStatus = (condition.Status == "Ignore" and ignoredArgs) or blockedArgs
+	local storage = condition.Storage
+	local argStatus = storage[index] or condition.Branch
 
-	if value ~= nil then
+	if condition.Enabled then
+		condition.Branch = argStatus
+		storage[index] = argStatus
+	end
+
+	if conditionIsNaN(value) then
+		argStatus.nan = condition.Enabled or false
+	elseif value ~= nil then
 		argStatus.values[value] = condition.Enabled or nil
 	else
 		argStatus.types[condition.Type] = condition.Enabled or nil
+	end
+
+	if not condition.Enabled and conditionBranchIsEmpty(argStatus) and storage[index] == argStatus then
+		storage[index] = nil
 	end
 end
 
 function Condition.remove(condition)
 	local branch = condition.Branch
+	local storage = condition.Storage
 	condition.Button:Remove()
 
-	if condition.Value ~= nil then
-		branch.values[condition.Value] = nil
-	else
-		branch.types[condition.Type] = nil
+	if condition.Enabled then
+		if conditionIsNaN(condition.Value) then
+			branch.nan = false
+		elseif condition.Value ~= nil then
+			branch.values[condition.Value] = nil
+		else
+			branch.types[condition.Type] = nil
+		end
+
+		if conditionBranchIsEmpty(branch) and storage[condition.Index] == branch then
+			storage[condition.Index] = nil
+		end
 	end
 end
 
 local function createConditions(hook)
+	selected.condition = nil
+	selectedConditionTargets = {}
 	closureConditions:Clear()
 
 	ClosureList.Visible = false
@@ -713,6 +989,10 @@ local function createConditions(hook)
 		for value in pairs(arg.values) do
 			Condition.new(hook, "Ignore", index, value)
 		end
+
+		if arg.nan then
+			Condition.new(hook, "Ignore", index, 0 / 0)
+		end
 	end
 
 	for index, arg in pairs(hook.BlockedArgs) do
@@ -722,6 +1002,10 @@ local function createConditions(hook)
 
 		for value in pairs(arg.values) do
 			Condition.new(hook, "Block", index, value)
+		end
+
+		if arg.nan then
+			Condition.new(hook, "Block", index, 0 / 0)
 		end
 	end
 end
@@ -762,6 +1046,8 @@ function Log.new(hook)
 	buttonName.Text = closure.Name
 
 	local function viewLogs()
+		selectedLogTargets = {}
+
 		if selected.hookLog then
 			resetRenderedCalls()
 		end
@@ -794,6 +1080,10 @@ function Log.new(hook)
 			ClosureLogs.Visible = true
 
 			selected.hookLog = log
+
+			if dirtyLogRenders[log] then
+				queueLogRender(log)
+			end
 		end)
 	end)
 
@@ -808,9 +1098,9 @@ function Log.new(hook)
 		end)
 	end)
 
-	listButton:SetSelectedCallback(function()
-		if not table.find(selected.logs, log) then
-			table.insert(selected.logs, log)
+	button.MouseButton2Click:Connect(function()
+		if uiAlive() then
+			selectedLogTargets = collectSelectedLogs()
 		end
 	end)
 
@@ -828,6 +1118,7 @@ function Log.new(hook)
 	log.Adjust = Log.adjust
 	log.IncrementCalls = Log.incrementCalls
 	log.DecrementCalls = Log.decrementCalls
+	listButton.Log = log
 
 	return log
 end
@@ -880,6 +1171,36 @@ function ArgsLog.new(log, call)
 end
 
 renderLatestCalls = function(log, rebuild)
+	if not uiAlive() or not Page.Visible then
+		if alive then
+			dirtyLogRenders[log] = true
+		end
+
+		return
+	end
+
+	dirtyLogRenders[log] = nil
+	local oldCanvasY = LogsResults.CanvasPosition.Y
+	local followNewest = rebuild == true or oldCanvasY <= 6
+	local anchorCall
+	local anchorOrder
+
+	if not followNewest and renderedCallLog == log then
+		for call, button in pairs(renderedCallButtons) do
+			local instance = button.Instance
+
+			if instance and instance.Parent and instance.Visible then
+				local order = instance.LayoutOrder
+				local relativeBottom = instance.AbsolutePosition.Y - LogsResults.AbsolutePosition.Y + instance.AbsoluteSize.Y
+
+				if relativeBottom > 0 and (not anchorOrder or order < anchorOrder) then
+					anchorCall = call
+					anchorOrder = order
+				end
+			end
+		end
+	end
+
 	hookLogs:BeginBatch()
 
 	if rebuild or renderedCallLog ~= log then
@@ -889,12 +1210,23 @@ renderLatestCalls = function(log, rebuild)
 
 	local logs = log.Hook.Logs
 	local total = #logs
-	local first = math.max(1, total - getMaxRenderedLogs() + 1)
+	local newest = total
+
+	if anchorCall and anchorOrder then
+		for index = total, 1, -1 do
+			if logs[index] == anchorCall then
+				newest = math.min(total, index + anchorOrder - 1)
+				break
+			end
+		end
+	end
+
+	local first = math.max(1, newest - getMaxRenderedLogs() + 1)
 	local desiredCalls = {}
 	local desiredOrder = {}
 	local layoutOrder = 0
 
-	for index = first, total do
+	for index = newest, first, -1 do
 		local call = logs[index]
 
 		if call then
@@ -912,7 +1244,7 @@ renderLatestCalls = function(log, rebuild)
 		end
 	end
 
-	for index = first, total do
+	for index = newest, first, -1 do
 		local call = logs[index]
 
 		if call then
@@ -930,10 +1262,35 @@ renderLatestCalls = function(log, rebuild)
 
 	hookLogs:EndBatch()
 	hookLogs:QueueRecalculate()
+
+	task.defer(function()
+		if
+			not uiAlive()
+			or not Page.Visible
+			or not ClosureLogs.Visible
+			or selected.hookLog ~= log
+			or not LogsResults.Parent
+		then
+			return
+		end
+
+		if followNewest then
+			LogsResults.CanvasPosition = Vector2.new(LogsResults.CanvasPosition.X, 0)
+		else
+			local maximum = math.max(0, LogsResults.AbsoluteCanvasSize.Y - LogsResults.AbsoluteWindowSize.Y)
+			LogsResults.CanvasPosition = Vector2.new(LogsResults.CanvasPosition.X, math.min(maximum, oldCanvasY))
+		end
+	end)
 end
 
 queueLogRender = function(log)
-	if queuedLogRenders[log] then
+	if not uiAlive() then
+		return
+	end
+
+	dirtyLogRenders[log] = true
+
+	if not Page.Visible or not ClosureLogs.Visible or selected.hookLog ~= log or queuedLogRenders[log] then
 		return
 	end
 
@@ -941,13 +1298,23 @@ queueLogRender = function(log)
 	task.defer(function()
 		queuedLogRenders[log] = nil
 
-		if selected.hookLog == log and ClosureLogs.Visible then
+		if
+			uiAlive()
+			and Page.Visible
+			and ClosureLogs.Visible
+			and selected.hookLog == log
+			and dirtyLogRenders[log]
+		then
 			renderLatestCalls(log)
 		end
 	end)
 end
 
 local function updateCountDisplay(log)
+	if not uiAlive() then
+		return
+	end
+
 	local logInstance = log.Button.Instance
 	local calls = log.Hook.Calls
 
@@ -955,20 +1322,93 @@ local function updateCountDisplay(log)
 	log:Adjust()
 end
 
+local function flushCountUpdates()
+	countUpdateQueued = false
+
+	if not uiAlive() or not Page.Visible then
+		return
+	end
+
+	local pending = queuedCountUpdates
+	queuedCountUpdates = {}
+
+	for log in pairs(pending) do
+		if not uiAlive() or not Page.Visible then
+			queuedCountUpdates[log] = true
+		else
+			local button = log.Button
+			local instance = button and button.Instance
+
+			if instance and instance.Parent and currentLogs[log.Hook] == log then
+				updateCountDisplay(log)
+			end
+		end
+	end
+end
+
+local function scheduleCountUpdates()
+	if countUpdateQueued or not uiAlive() or not Page.Visible or next(queuedCountUpdates) == nil then
+		return
+	end
+
+	countUpdateQueued = true
+	task.defer(function()
+		if not uiAlive() then
+			countUpdateQueued = false
+			return
+		end
+
+		flushCountUpdates()
+	end)
+end
+
 local function queueCountUpdate(log)
-	if queuedCountUpdates[log] then
+	if not uiAlive() then
 		return
 	end
 
 	queuedCountUpdates[log] = true
-	task.defer(function()
-		queuedCountUpdates[log] = nil
-
-		if log.Button and log.Button.Instance and log.Button.Instance.Parent then
-			updateCountDisplay(log)
-		end
-	end)
+	scheduleCountUpdates()
 end
+
+local visibleConnection = Page:GetPropertyChangedSignal("Visible"):Connect(function()
+	if not uiAlive() then
+		return
+	end
+
+	if Page.Visible then
+		scheduleCountUpdates()
+
+		local log = selected.hookLog
+
+		if log and ClosureLogs.Visible and dirtyLogRenders[log] then
+			queueLogRender(log)
+		end
+	else
+		detailsGeneration = detailsGeneration + 1
+		selectedLogTargets = {}
+		selectedConditionTargets = {}
+		local viewer = activeViewer
+		activeViewer = nil
+
+		if viewer then
+			pcall(TextViewer.Hide, viewer)
+		end
+	end
+end)
+oh.Events[#oh.Events + 1] = visibleConnection
+
+local destroyingConnection = Page.Destroying:Connect(function()
+	lifecycle:Disconnect()
+end)
+oh.Events[#oh.Events + 1] = destroyingConnection
+
+local ancestryConnection = Page.AncestryChanged:Connect(function()
+	if alive and not Page:IsDescendantOf(game) then
+		lifecycle:Disconnect()
+	end
+end)
+oh.Events[#oh.Events + 1] = ancestryConnection
 
 function Log.playIgnore(log)
 	log.IgnoreAnimation:Play()
@@ -1026,6 +1466,7 @@ end
 
 function Log.remove(log)
 	local hook = log.Hook
+	local returnToList = selected.hookLog == log or selected.conditionLog == log
 	local removedHook, removeError = hook:Remove()
 
 	if not removedHook then
@@ -1038,6 +1479,26 @@ function Log.remove(log)
 		selected.hookLog = nil
 	end
 
+	if selected.conditionLog == log then
+		selected.conditionLog = nil
+		selected.condition = nil
+		selectedConditionTargets = {}
+		closureConditions:Clear()
+		newClosureCondition:Hide()
+	end
+
+	if returnToList then
+		detailsGeneration = detailsGeneration + 1
+		TextViewer.Hide(activeViewer)
+		activeViewer = nil
+		ClosureLogs.Visible = false
+		ClosureConditions.Visible = false
+		ClosureList.Visible = true
+	end
+
+	queuedLogRenders[log] = nil
+	dirtyLogRenders[log] = nil
+	queuedCountUpdates[log] = nil
 	log.Button:Remove()
 	currentLogs[hook] = nil
 	removed[hook] = true
@@ -1070,7 +1531,11 @@ end)
 
 LogsButtons.Ignore.MouseButton1Click:Connect(function()
 	local selectedLog = selected.hookLog
-	local hook = selectedLog.Hook
+	local hook = selectedLog and selectedLog.Hook
+
+	if not hook or currentLogs[hook] ~= selectedLog then
+		return
+	end
 
 	hook:Ignore()
 
@@ -1087,7 +1552,11 @@ end)
 
 LogsButtons.Block.MouseButton1Click:Connect(function()
 	local selectedLog = selected.hookLog
-	local hook = selectedLog.Hook
+	local hook = selectedLog and selectedLog.Hook
+
+	if not hook or currentLogs[hook] ~= selectedLog then
+		return
+	end
 
 	hook:Block()
 
@@ -1103,13 +1572,25 @@ LogsButtons.Block.MouseButton1Click:Connect(function()
 end)
 
 LogsButtons.Clear.MouseButton1Click:Connect(function()
-	selected.hookLog:Clear()
+	local selectedLog = selected.hookLog
+	local hook = selectedLog and selectedLog.Hook
+
+	if hook and currentLogs[hook] == selectedLog then
+		selectedLog:Clear()
+	end
 end)
 
 LogsButtons.Conditions.MouseButton1Click:Connect(function()
-	selected.conditionLog = selected.hookLog
+	local selectedLog = selected.hookLog
+	local hook = selectedLog and selectedLog.Hook
 
-	createConditions(selected.conditionLog.Hook)
+	if not hook or currentLogs[hook] ~= selectedLog then
+		return
+	end
+
+	selected.conditionLog = selectedLog
+
+	createConditions(hook)
 end)
 
 ConditionsBack.MouseButton1Click:Connect(function()
@@ -1122,68 +1603,271 @@ ConditionsBack.MouseButton1Click:Connect(function()
 	end
 end)
 
+local function conditionBufferLimit()
+	return tonumber(oh.Settings and oh.Settings.MaxConditionBufferBytes) or 4096
+end
+
+local function parseConditionHexBuffer(text)
+	if not buffer or type(buffer.create) ~= "function" or type(buffer.writeu8) ~= "function" then
+		return nil, "buffer creation is unavailable"
+	end
+
+	local bytes = {}
+	local maximum = conditionBufferLimit()
+
+	for token in text:gmatch("%S+") do
+		if not token:match("^%x%x$") then
+			return nil, "Hex buffers must use two-digit bytes such as DE AD BE EF"
+		end
+
+		bytes[#bytes + 1] = tonumber(token, 16)
+
+		if #bytes > maximum then
+			return nil, ("Buffer conditions are limited to %d bytes"):format(maximum)
+		end
+	end
+
+	local result = buffer.create(#bytes)
+
+	for index, byte in ipairs(bytes) do
+		buffer.writeu8(result, index - 1, byte)
+	end
+
+	return result
+end
+
+local function parseConditionNumber(text)
+	local normalized = text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+
+	if normalized == "nan" or normalized == "0/0" then
+		return 0 / 0
+	elseif normalized == "inf" or normalized == "+inf" or normalized == "infinity" or normalized == "math.huge" then
+		return math.huge
+	elseif normalized == "-inf" or normalized == "-infinity" or normalized == "-math.huge" then
+		return -math.huge
+	end
+
+	return tonumber(normalized)
+end
+
+local function validateConditionBuffer(value)
+	if not buffer or type(buffer.len) ~= "function" then
+		return false, "buffer length inspection is unavailable"
+	end
+
+	local measured, length = pcall(buffer.len, value)
+	local maximum = conditionBufferLimit()
+
+	if not measured then
+		return false, "The buffer length could not be read"
+	elseif length > maximum then
+		return false, ("Buffer conditions are limited to %d bytes"):format(maximum)
+	end
+
+	return true
+end
+
+local function validConditionIndex(value)
+	local index = tonumber(value)
+
+	if not index or index ~= index or index == math.huge or index == -math.huge or index < 1 or index % 1 ~= 0 then
+		return nil
+	end
+
+	return index
+end
+
+local function selectedArgument(index)
+	local args = selected.args
+	local count = getArgCount(args)
+
+	if selected.hookLog ~= selected.conditionLog or not args or index < 1 or index > count then
+		return nil, false
+	end
+
+	return args[index], true
+end
+
+local function conditionBufferHex(value)
+	if
+		not buffer
+		or type(buffer.len) ~= "function"
+		or type(buffer.readu8) ~= "function"
+		or typeof(value) ~= "buffer"
+	then
+		return nil
+	end
+
+	local measured, length = pcall(buffer.len, value)
+	local maximum = conditionBufferLimit()
+
+	if not measured or type(length) ~= "number" or length < 0 or length > maximum then
+		return nil
+	end
+
+	local bytes = table.create and table.create(length) or {}
+
+	for offset = 0, length - 1 do
+		local read, byte = pcall(buffer.readu8, value, offset)
+
+		if not read then
+			return nil
+		end
+
+		bytes[offset + 1] = ("%02X"):format(byte)
+	end
+
+	return table.concat(bytes, " ")
+end
+
+local function prefillCondition(index, populateValue)
+	index = validConditionIndex(index) or 1
+	NewConditionIndex.Value.Input.Text = tostring(index)
+	populateValue = populateValue == true
+
+	local value, present = selectedArgument(index)
+	local input = NewConditionContent.Value.Input
+
+	if present then
+		local valueType = typeof(value)
+		conditionType:AddOption(valueType, oh.Constants.Types[valueType] or oh.Constants.Types.userdata)
+		conditionType:SetSelected(valueType)
+
+		if not populateValue then
+			input.Text = ""
+		elseif type(value) == "string" then
+			input.Text = value
+		elseif valueType == "buffer" then
+			input.Text = conditionBufferHex(value) or ""
+		elseif type(value) == "table" or type(value) == "function" or type(value) == "thread" or value == nil then
+			input.Text = ""
+		elseif type(dataToString) == "function" then
+			local serialized, result = pcall(dataToString, value)
+			input.Text = serialized and tostring(result) or ""
+		else
+			input.Text = tostring(value)
+		end
+	elseif not conditionType.Selected then
+		conditionType:SetSelected("string")
+		input.Text = ""
+	elseif not populateValue then
+		input.Text = ""
+	end
+end
+
+local function setConditionAssociation(mode)
+	local input = NewConditionContent.Value.Input
+	local byType = mode == "Type"
+
+	input.TextEditable = not byType
+	input.ClearTextOnFocus = false
+	input.PlaceholderText = byType and "Value is not needed for a type match" or "Enter a value or Luau constructor"
+	input.TextTransparency = byType and 0.45 or 0
+end
+
 ConditionsButtons.New.MouseButton1Click:Connect(function()
+	conditionStatus:SetSelected(conditionStatus.Selected and conditionStatus.Selected.Name or "Ignore")
+	conditionValueType:SetSelected(conditionValueType.Selected and conditionValueType.Selected.Name or "Type")
+	prefillCondition(
+		NewConditionIndex.Value.Input.Text,
+		conditionValueType.Selected and conditionValueType.Selected.Name == "Value"
+	)
+	setConditionAssociation(conditionValueType.Selected and conditionValueType.Selected.Name or "Type")
 	newClosureCondition:Show()
 end)
 
 NewConditionButtons.Add.MouseButton1Click:Connect(function()
-	if not conditionStatus.Selected then
-		return MessageBox.Show("Error", "Invalid condition status", MessageType.OK)
+	local status = conditionStatus.Selected and conditionStatus.Selected.Name
+	local selectedType = conditionType.Selected and conditionType.Selected.Name
+	local valueType = conditionValueType.Selected and conditionValueType.Selected.Name
+	local value = NewConditionContent.Value.Input.Text
+	local argIndex = validConditionIndex(NewConditionIndex.Value.Input.Text)
+	local conditionLog = selected.conditionLog
+	local selectedHook = conditionLog and conditionLog.Hook
+
+	if not selectedHook or currentLogs[selectedHook] ~= conditionLog then
+		newClosureCondition:Hide()
+		pcall(oh.setStatus, "Condition target is no longer available")
+		return
 	end
 
-	local status = conditionStatus.Selected.Name
-	local type = conditionType.Selected.Name
-	local valueType = conditionValueType.Selected.Name
-	local value = NewConditionContent.Value.Input.Text
-
 	if status ~= "Ignore" and status ~= "Block" then
-		MessageBox.Show("Error", "Invalid condition status", MessageType.OK)
-	elseif not oh.Constants.Types[type] and not isUserdata(type) then
-		MessageBox.Show("Error", "Invalid condition type", MessageType.OK)
+		return MessageBox.Show("Error", "Choose Ignore or Block", MessageType.OK)
+	elseif type(selectedType) ~= "string" or selectedType == "" then
+		return MessageBox.Show("Error", "Choose an argument type", MessageType.OK)
 	elseif valueType ~= "Value" and valueType ~= "Type" then
-		MessageBox.Show("Error", "Invalid condition value association", MessageType.OK)
+		return MessageBox.Show("Error", "Choose whether to match by Type or Value", MessageType.OK)
+	elseif not argIndex then
+		return MessageBox.Show("Error", "Argument index must be a positive whole number", MessageType.OK)
 	elseif valueType == "Value" then
-		if type == "string" then
-			value = toString(value)
-		elseif type == "number" then
-			value = tonumber(value)
+		if selectedType == "nil" or selectedType == "table" or selectedType == "function" or selectedType == "thread" then
+			return MessageBox.Show("Error", "Use a Type condition for " .. selectedType .. " arguments", MessageType.OK)
+		elseif selectedType == "string" then
+			value = value
+		elseif selectedType == "number" then
+			value = parseConditionNumber(value)
 
-			if not value then
+			if value == nil then
 				return MessageBox.Show("Error", "Your input does not match the type you selected", MessageType.OK)
 			end
-		elseif type == "boolean" then
-			if value == "true" then
+		elseif selectedType == "boolean" then
+			local lowered = value:lower():gsub("^%s+", ""):gsub("%s+$", "")
+
+			if lowered == "true" then
 				value = true
-			elseif value == "false" then
+			elseif lowered == "false" then
 				value = false
 			else
 				return MessageBox.Show("Error", "Your input does not match the type you selected", MessageType.OK)
 			end
-		else
-			local success, result = pcall(loadstring("return " .. value))
+		elseif selectedType == "buffer" and value:match("^%s*[%x][%x%s]*%s*$") then
+			local parsed, parseError = parseConditionHexBuffer(value)
 
-			if valueType == "Value" then
-				if not success then
-					return MessageBox.Show("Error", "There was an error interpreting your input value", MessageType.OK)
-				elseif typeof(result) ~= type then
-					return MessageBox.Show("Error", "Your input does not match the type you selected", MessageType.OK)
-				else
-					value = result
+			if not parsed then
+				return MessageBox.Show("Error", tostring(parseError), MessageType.OK)
+			end
+
+			value = parsed
+		else
+			local chunk, compileError = loadstring("return " .. value)
+
+			if not chunk then
+				return MessageBox.Show("Error", tostring(compileError), MessageType.OK)
+			end
+
+			local success, result = pcall(chunk)
+
+			if not success then
+				return MessageBox.Show("Error", tostring(result), MessageType.OK)
+			elseif typeof(result) ~= selectedType then
+				return MessageBox.Show("Error", "Your input does not match the type you selected", MessageType.OK)
+			end
+
+			value = result
+
+			if selectedType == "buffer" then
+				local valid, bufferError = validateConditionBuffer(value)
+
+				if not valid then
+					return MessageBox.Show("Error", tostring(bufferError), MessageType.OK)
 				end
 			end
 		end
 	else
-		value = type
+		value = selectedType
 	end
 
-	local selectedHook = selected.conditionLog.Hook
-	local argIndex = tonumber(NewConditionIndex.Value.Input.Text)
 	local byType = valueType == "Type"
+	local added, addError
 
 	if status == "Block" then
-		selectedHook:BlockArg(argIndex, value, byType)
+		added, addError = selectedHook:BlockArg(argIndex, value, byType)
 	else
-		selectedHook:IgnoreArg(argIndex, value, byType)
+		added, addError = selectedHook:IgnoreArg(argIndex, value, byType)
+	end
+
+	if not added then
+		return MessageBox.Show("Condition Not Added", tostring(addError or "That condition already exists"), MessageType.OK)
 	end
 
 	if byType then
@@ -1200,21 +1884,20 @@ NewConditionButtons.Cancel.MouseButton1Click:Connect(function()
 end)
 
 NewConditionIndex.Add.MouseButton1Click:Connect(function()
-	local newIndex = tonumber(NewConditionIndex.Value.Input.Text) + 1
-	NewConditionIndex.Value.Input.Text = newIndex
+	local newIndex = (validConditionIndex(NewConditionIndex.Value.Input.Text) or 1) + 1
+	prefillCondition(newIndex, conditionValueType.Selected and conditionValueType.Selected.Name == "Value")
 end)
 
 NewConditionIndex.Sub.MouseButton1Click:Connect(function()
-	local newIndex = tonumber(NewConditionIndex.Value.Input.Text) - 1
-	NewConditionIndex.Value.Input.Text = (newIndex <= 0 and 1) or newIndex
+	local newIndex = math.max(1, (validConditionIndex(NewConditionIndex.Value.Input.Text) or 1) - 1)
+	prefillCondition(newIndex, conditionValueType.Selected and conditionValueType.Selected.Name == "Value")
 end)
 
 NewConditionIndex.Value.Input.FocusLost:Connect(function()
-	local newIndex = tonumber(NewConditionIndex.Value.Input.Text)
-
-	if not newIndex or newIndex <= 0 then
-		NewConditionIndex.Value.Input.Text = 1
-	end
+	prefillCondition(
+		validConditionIndex(NewConditionIndex.Value.Input.Text) or 1,
+		conditionValueType.Selected and conditionValueType.Selected.Name == "Value"
+	)
 end)
 
 conditionContext:SetCallback(function()
@@ -1266,25 +1949,23 @@ removeContext:SetCallback(function()
 end)
 
 ignoreContextSelected:SetCallback(function()
-	for _i, log in pairs(selected.logs) do
+	for _, log in ipairs(consumeSelectedLogs()) do
 		local hook = log.Hook
 
 		if not hook.Ignored then
 			hook:Ignore()
 		end
 
-		if log.Blocked then
+		if hook.Blocked then
 			log:PlayBlock()
 		elseif hook.Ignored then
 			log:PlayIgnore()
 		end
 	end
-
-	selected.logs = {}
 end)
 
 unignoreContextSelected:SetCallback(function()
-	for _i, log in pairs(selected.logs) do
+	for _, log in ipairs(consumeSelectedLogs()) do
 		local hook = log.Hook
 
 		if hook.Ignored then
@@ -1297,12 +1978,10 @@ unignoreContextSelected:SetCallback(function()
 			log:PlayNormal()
 		end
 	end
-
-	selected.logs = {}
 end)
 
 blockContextSelected:SetCallback(function()
-	for _i, log in pairs(selected.logs) do
+	for _, log in ipairs(consumeSelectedLogs()) do
 		local hook = log.Hook
 
 		if not hook.Blocked then
@@ -1315,12 +1994,10 @@ blockContextSelected:SetCallback(function()
 			log:PlayIgnore()
 		end
 	end
-
-	selected.logs = {}
 end)
 
 unblockContextSelected:SetCallback(function()
-	for _i, log in pairs(selected.logs) do
+	for _, log in ipairs(consumeSelectedLogs()) do
 		local hook = log.Hook
 
 		if hook.Blocked then
@@ -1333,25 +2010,20 @@ unblockContextSelected:SetCallback(function()
 			log:PlayNormal()
 		end
 	end
-
-	selected.logs = {}
 end)
 
 clearContextSelected:SetCallback(function()
-	for _i, log in pairs(selected.logs) do
+	for _, log in ipairs(consumeSelectedLogs()) do
 		log:Clear()
 	end
-
-	selected.logs = {}
 end)
 
 removeContextSelected:SetCallback(function()
-	for _i, log in pairs(selected.logs) do
+	for _, log in ipairs(consumeSelectedLogs()) do
 		log:Remove()
 	end
 
 	closureList:Recalculate()
-	selected.logs = {}
 end)
 
 local function showArguments()
@@ -1391,22 +2063,26 @@ end
 
 local function inspectCallingFunction()
 	local func = selected.func
-	showDetailsAsync("Calling Function", "Inspecting calling function ...", function()
-		return describeFunction(func)
+	showDetailsAsync("Calling Function", "Inspecting calling function ...", function(_call, isAlive)
+		return describeFunction(func, isAlive)
 	end)
 end
 
 local function inspectTargetFunction()
 	local func = selected.hookLog and selected.hookLog.Hook and selected.hookLog.Hook.Target
-	showDetailsAsync("Target Function", "Inspecting target function ...", function()
-		return describeFunction(func)
+	showDetailsAsync("Target Function", "Inspecting target function ...", function(_call, isAlive)
+		return describeFunction(func, isAlive)
 	end)
 end
 
 local function inspectCallingScript()
 	local scriptInstance = selected.callingScript
-	showDetailsAsync("Calling Script", "Decompiling calling script ...", function()
-		return describeScript(scriptInstance)
+	showDetailsAsync("Calling Script", "Decompiling calling script ...", function(_call, isAlive)
+		if not isAlive() then
+			return "Inspection was cancelled."
+		end
+
+		return describeScript(scriptInstance, isAlive)
 	end)
 end
 
@@ -1468,7 +2144,10 @@ callingScriptContext:SetCallback(copyCallingScriptPath)
 spyClosureContext:SetCallback(spyCallingFunction)
 
 callInspector = ActionPanel.Install(LogsButtons, ClosureLogs.Results, {
-	Columns = 4,
+	Columns = 5,
+	MinimumCellWidth = 110,
+	ButtonHeight = 21,
+	Gap = 3,
 	Actions = {
 		{ Name = "Arguments", Label = "Arguments", Icon = icons.arguments, Callback = showArguments },
 		{ Name = "Returns", Label = "Returns", Icon = icons.results, Callback = showReturns },
@@ -1489,11 +2168,9 @@ removeConditionContext:SetCallback(function()
 end)
 
 removeConditionContextSelected:SetCallback(function()
-	for _i, condition in pairs(selected.conditions) do
+	for _, condition in ipairs(consumeSelectedConditions()) do
 		condition:Remove()
 	end
-
-	selected.conditions = {}
 end)
 
 conditionStatus:SetCallback(function(_dropdown, selected)
@@ -1519,7 +2196,13 @@ conditionValueType:SetCallback(function(_dropdown, selected)
 
 	icon.Image = iconCondition
 	icon.Border.Image = iconCondition
+	setConditionAssociation(selected.Name)
+	prefillCondition(NewConditionIndex.Value.Input.Text, selected.Name == "Value")
 end)
+
+conditionStatus:SetSelected("Ignore")
+conditionType:SetSelected("string")
+conditionValueType:SetSelected("Type")
 
 closureList:BeginBatch()
 
@@ -1536,8 +2219,12 @@ end
 closureList:EndBatch()
 
 Methods.SetEvent(function(hook, call)
+	if not uiAlive() then
+		return
+	end
+
 	withExecutorIdentity(function()
-		if not removed[hook] then
+		if uiAlive() and not removed[hook] then
 			local log = currentLogs[hook] or Log.new(hook)
 			log:IncrementCalls(call)
 		end

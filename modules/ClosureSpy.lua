@@ -26,14 +26,21 @@ local diagnostics = {
     CallsForwarded = 0,
     CallsBlocked = 0,
     ForwardErrors = 0,
+    LogsDropped = 0,
     StackCaptures = 0,
-    StackCapturesRateLimited = 0
+    StackCapturesRateLimited = 0,
+    BuffersSnapshotted = 0,
+    BufferSnapshotsTruncated = 0,
+    BufferSnapshotFailures = 0,
+    CallSnapshotsTruncated = 0
 }
 
-local function createLogBuffer(capacity)
+local function createLogBuffer(capacity, byteCapacity)
     local storage = {}
+    local sizes = {}
     local head = 1
     local count = 0
+    local storedBytes = 0
     local methods = {}
     local proxy = {}
 
@@ -41,16 +48,71 @@ local function createLogBuffer(capacity)
         return ((head + logicalIndex - 2) % capacity) + 1
     end
 
-    function methods.Push(_, value)
-        if count < capacity then
-            count = count + 1
-            storage[physicalIndex(count)] = value
+    local function valueBytes(value)
+        return math.max(0, math.floor(tonumber(type(value) == "table" and value.capturedBytes) or 0))
+    end
+
+    local function popOldest()
+        if count == 0 then
             return nil
         end
 
         local dropped = storage[head]
-        storage[head] = value
+        storedBytes = math.max(0, storedBytes - (sizes[head] or 0))
+        storage[head] = nil
+        sizes[head] = nil
         head = (head % capacity) + 1
+        count = count - 1
+
+        if count == 0 then
+            head = 1
+        end
+
+        return dropped
+    end
+
+    function methods.Push(_, value)
+        local bytes = valueBytes(value)
+        local dropped = 0
+
+        while count > 0 and (count >= capacity or storedBytes + bytes > byteCapacity) do
+            popOldest()
+            dropped = dropped + 1
+        end
+
+        count = count + 1
+        local index = physicalIndex(count)
+        storage[index] = value
+        sizes[index] = bytes
+        storedBytes = storedBytes + bytes
+        return dropped
+    end
+
+    function methods.RefreshBytes(_, target)
+        local found
+
+        for logicalIndex = 1, count do
+            if storage[physicalIndex(logicalIndex)] == target then
+                found = physicalIndex(logicalIndex)
+                break
+            end
+        end
+
+        if not found then
+            return 0
+        end
+
+        local nextBytes = valueBytes(target)
+        storedBytes = math.max(0, storedBytes - (sizes[found] or 0)) + nextBytes
+        sizes[found] = nextBytes
+
+        local dropped = 0
+
+        while count > 1 and storedBytes > byteCapacity do
+            popOldest()
+            dropped = dropped + 1
+        end
+
         return dropped
     end
 
@@ -68,11 +130,18 @@ local function createLogBuffer(capacity)
             return false
         end
 
+        storedBytes = math.max(0, storedBytes - (sizes[physicalIndex(found)] or 0))
+
         for logicalIndex = found, count - 1 do
-            storage[physicalIndex(logicalIndex)] = storage[physicalIndex(logicalIndex + 1)]
+            local index = physicalIndex(logicalIndex)
+            local nextIndex = physicalIndex(logicalIndex + 1)
+            storage[index] = storage[nextIndex]
+            sizes[index] = sizes[nextIndex]
         end
 
-        storage[physicalIndex(count)] = nil
+        local lastIndex = physicalIndex(count)
+        storage[lastIndex] = nil
+        sizes[lastIndex] = nil
         count = count - 1
 
         if count == 0 then
@@ -84,8 +153,14 @@ local function createLogBuffer(capacity)
 
     function methods.Clear()
         storage = {}
+        sizes = {}
         head = 1
         count = 0
+        storedBytes = 0
+    end
+
+    function methods.Bytes()
+        return storedBytes
     end
 
     local function iterate()
@@ -142,6 +217,39 @@ end
 local function getMaxClosureLogs()
     return math.max(1, math.floor(getSetting("MaxClosureLogs", 500)))
 end
+
+local function getMaxClosureHistoryBytes()
+    local settings = oh and oh.Settings
+    local function finiteNumber(value)
+        value = tonumber(value)
+
+        if not value or value ~= value or value == math.huge or value == -math.huge then
+            return nil
+        end
+
+        return value
+    end
+
+    local value = finiteNumber(settings and settings.MaxClosureHistoryBytes)
+        or finiteNumber(settings and settings.MaxRemoteHistoryBytes)
+        or 16777216
+
+    return math.max(1, math.floor(value))
+end
+
+local maxClosureHistoryBytes = getMaxClosureHistoryBytes()
+local maxCapturedCallBytes = math.min(
+    maxClosureHistoryBytes,
+    math.max(4096, math.floor(getSetting("MaxCapturedCallBytes", 262144)))
+)
+local maxCapturedArguments = math.max(
+    8,
+    math.min(1024, math.floor(getSetting("MaxCapturedArguments", 128)))
+)
+local maxCapturedBufferBytes = math.max(256, math.floor(getSetting("MaxGeneratedBufferBytes", 65536)))
+local maxCapturedTableEntries = math.max(8, math.floor(getSetting("MaxGeneratedTableEntries", 256)))
+local maxCapturedTableDepth = math.max(1, math.floor(getSetting("MaxGeneratedTableDepth", 16)))
+local maxCapturedBufferPreviewBytes = math.max(16, math.floor(getSetting("MaxHexBytes", 512)))
 
 local function getMaxStackFrames()
     return math.max(1, math.floor(getSetting("MaxStackFrames", 24)))
@@ -458,6 +566,230 @@ local function tailResults(results)
     return values
 end
 
+local function makeCaptureMarker(kind, detail)
+    return {
+        __hydroxideCaptureMarker = true,
+        Kind = kind,
+        Detail = detail
+    }
+end
+
+local function readBufferPreview(value, length, maximum)
+    if not buffer or type(buffer.readu8) ~= "function" then
+        return nil
+    end
+
+    local shown = math.min(length, maximum or maxCapturedBufferPreviewBytes)
+    local parts = {}
+    local ran = pcall(function()
+        for offset = 0, shown - 1 do
+            parts[offset + 1] = string.char(buffer.readu8(value, offset))
+        end
+    end)
+
+    return ran and table.concat(parts) or nil
+end
+
+local function reserveCaptureBytes(state, amount)
+    amount = math.max(0, math.floor(tonumber(amount) or 0))
+
+    if state.Bytes + amount > maxCapturedCallBytes then
+        state.Replayable = false
+        state.Truncated = true
+        return false
+    end
+
+    state.Bytes = state.Bytes + amount
+    return true
+end
+
+local function addBoundedBufferPreview(marker, value, length, state)
+    local remaining = math.max(0, maxCapturedCallBytes - state.Bytes)
+    local shown = math.min(length, maxCapturedBufferPreviewBytes, remaining)
+
+    if shown > 0 then
+        marker.Preview = readBufferPreview(value, length, shown)
+
+        if marker.Preview then
+            reserveCaptureBytes(state, #marker.Preview)
+        end
+    end
+end
+
+local function snapshotBuffer(value, state)
+    if not buffer
+        or type(buffer.len) ~= "function"
+        or type(buffer.tostring) ~= "function"
+        or type(buffer.fromstring) ~= "function"
+    then
+        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
+        state.Replayable = false
+        return makeCaptureMarker("buffer", "Buffer copy APIs are unavailable")
+    end
+
+    local measured, length = pcall(buffer.len, value)
+
+    if not measured
+        or type(length) ~= "number"
+        or length ~= length
+        or length < 0
+        or length == math.huge
+        or length % 1 ~= 0
+    then
+        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
+        state.Replayable = false
+        return makeCaptureMarker("buffer", "Buffer length could not be read")
+    elseif length > maxCapturedBufferBytes then
+        diagnostics.BufferSnapshotsTruncated = diagnostics.BufferSnapshotsTruncated + 1
+        state.Replayable = false
+        state.Truncated = true
+        local marker = makeCaptureMarker(
+            "buffer",
+            ("%d-byte buffer exceeds the %d-byte capture limit"):format(length, maxCapturedBufferBytes)
+        )
+        marker.Size = length
+        addBoundedBufferPreview(marker, value, length, state)
+        return marker
+    elseif not reserveCaptureBytes(state, length) then
+        diagnostics.BufferSnapshotsTruncated = diagnostics.BufferSnapshotsTruncated + 1
+        local marker = makeCaptureMarker(
+            "buffer",
+            ("Aggregate call capture exceeds the %d-byte limit"):format(maxCapturedCallBytes)
+        )
+        marker.Size = length
+        addBoundedBufferPreview(marker, value, length, state)
+        return marker
+    end
+
+    local copied, bytes = pcall(buffer.tostring, value)
+
+    if not copied or type(bytes) ~= "string" or #bytes ~= length then
+        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
+        state.Replayable = false
+        return makeCaptureMarker("buffer", "Buffer contents could not be copied")
+    end
+
+    local rebuilt, snapshot = pcall(buffer.fromstring, bytes)
+
+    if not rebuilt or typeof(snapshot) ~= "buffer" then
+        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
+        state.Replayable = false
+        return makeCaptureMarker("buffer", "Buffer snapshot could not be created")
+    end
+
+    local measuredSnapshot, snapshotLength = pcall(buffer.len, snapshot)
+
+    if not measuredSnapshot or snapshotLength ~= length then
+        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
+        state.Replayable = false
+        return makeCaptureMarker("buffer", "Buffer snapshot length did not match the source")
+    end
+
+    diagnostics.BuffersSnapshotted = diagnostics.BuffersSnapshotted + 1
+    return snapshot
+end
+
+local function snapshotPackedValues(values, initialBytes)
+    local state = {
+        Replayable = true,
+        Entries = 0,
+        Bytes = math.min(
+            maxCapturedCallBytes,
+            math.max(0, math.floor(tonumber(initialBytes) or 0))
+        ),
+        Truncated = false
+    }
+    local seen = setmetatable({}, { __mode = "k" })
+
+    local clone
+    clone = function(value, depth)
+        local valueType = typeof(value)
+
+        if valueType == "buffer" then
+            return snapshotBuffer(value, state)
+        elseif type(value) == "string" then
+            if reserveCaptureBytes(state, #value) then
+                return value
+            end
+
+            local marker = makeCaptureMarker(
+                "string",
+                ("Aggregate call capture exceeds the %d-byte limit"):format(maxCapturedCallBytes)
+            )
+            marker.Size = #value
+            local remaining = math.max(0, maxCapturedCallBytes - state.Bytes)
+            local shown = math.min(#value, maxCapturedBufferPreviewBytes, remaining)
+
+            if shown > 0 then
+                marker.Preview = value:sub(1, shown)
+                reserveCaptureBytes(state, #marker.Preview)
+            end
+
+            return marker
+        elseif type(value) ~= "table" then
+            return value
+        elseif seen[value] then
+            return seen[value]
+        elseif depth >= maxCapturedTableDepth then
+            state.Replayable = false
+            state.Truncated = true
+            return makeCaptureMarker("table", "Nested table exceeds the capture depth limit")
+        end
+
+        local copy = {}
+        seen[value] = copy
+
+        for key, nestedValue in next, value do
+            state.Entries = state.Entries + 1
+
+            if state.Entries > maxCapturedTableEntries then
+                state.Replayable = false
+                state.Truncated = true
+                copy.__hydroxideCaptureLimit = "Additional entries were omitted by the capture limit"
+                break
+            end
+
+            copy[clone(key, depth + 1)] = clone(nestedValue, depth + 1)
+        end
+
+        return copy
+    end
+
+    local originalCount = type(values) == "table" and tonumber(values.n) or nil
+
+    if not originalCount
+        or originalCount ~= originalCount
+        or originalCount == math.huge
+        or originalCount == -math.huge
+    then
+        originalCount = type(values) == "table" and #values or 0
+    end
+
+    originalCount = math.max(0, math.floor(originalCount))
+    local count = math.min(originalCount, maxCapturedArguments)
+    local snapshot = { n = count }
+
+    for index = 1, count do
+        snapshot[index] = clone(values[index], 0)
+    end
+
+    if originalCount > count then
+        state.Replayable = false
+        state.Truncated = true
+        snapshot.n = count + 1
+        snapshot[count + 1] = makeCaptureMarker(
+            "arguments",
+            ("%d additional arguments were omitted by the capture limit"):format(originalCount - count)
+        )
+    end
+
+    if state.Truncated then
+        diagnostics.CallSnapshotsTruncated = diagnostics.CallSnapshotsTruncated + 1
+    end
+
+    return snapshot, state.Replayable, state.Bytes
+end
+
 local function copyActiveCallChain(chain)
     chain = chain or getActiveChainStorage()
 
@@ -544,6 +876,12 @@ for _, callback in ipairs({
     captureCallStack,
     reserveStackCapture,
     captureTimestamp,
+    makeCaptureMarker,
+    readBufferPreview,
+    reserveCaptureBytes,
+    addBoundedBufferPreview,
+    snapshotBuffer,
+    snapshotPackedValues,
     copyActiveCallChain,
     buildCallerInfo,
     pushActiveCall,
@@ -608,7 +946,11 @@ function Hook.new(closure)
         Target = target,
         Calls = 0,
         DroppedLogs = 0,
-        Logs = createLogBuffer(getMaxClosureLogs()),
+        MaxHistoryBytes = maxClosureHistoryBytes,
+        MaxCapturedCallBytes = maxCapturedCallBytes,
+        MaxCapturedArguments = maxCapturedArguments,
+        HistoryBytes = 0,
+        Logs = createLogBuffer(getMaxClosureLogs(), maxClosureHistoryBytes),
         Ignored = false,
         Blocked = false,
         BlockedArgs = {},
@@ -624,6 +966,7 @@ function Hook.new(closure)
     hook.AreArgsBlocked = Hook.areArgsBlocked
     hook.AreArgsIgnored = Hook.areArgsIgnored
     hook.IncrementCalls = Hook.incrementCalls
+    hook.RefreshCallBytes = Hook.refreshCallBytes
     hook.DecrementCalls = Hook.decrementCalls
 
     local original
@@ -637,6 +980,7 @@ function Hook.new(closure)
             activeEntry = pushActiveCall(hook, callerInfo)
 
             if captureThisCall then
+                local args, replayable, capturedBytes = snapshotPackedValues(vargs)
                 call = {
                     script = callerInfo.script,
                     func = callerInfo.func,
@@ -645,7 +989,9 @@ function Hook.new(closure)
                     chain = copyActiveCallChain(activeEntry.chain),
                     timestamp = captureTimestamp(),
                     method = "closure",
-                    args = vargs
+                    args = args,
+                    replayable = replayable,
+                    capturedBytes = capturedBytes
                 }
                 hook:IncrementCalls(call)
                 diagnostics.CallsCaptured = diagnostics.CallsCaptured + 1
@@ -689,20 +1035,37 @@ function Hook.new(closure)
         popActiveCall(activeEntry)
 
         if call then
-            call.blocked = false
-            call.completed = true
-            call.durationMs = elapsedMilliseconds(started)
-            call.forwarded = results[1] == true
+            local finalized, finalizationError = pcall(function()
+                call.blocked = false
+                call.completed = true
+                call.durationMs = elapsedMilliseconds(started)
+                call.forwarded = results[1] == true
 
-            if results[1] then
-                call.returns = tailResults(results)
-                diagnostics.CallsForwarded = diagnostics.CallsForwarded + 1
-            else
-                call.error = tostring(results[2])
-                diagnostics.ForwardErrors = diagnostics.ForwardErrors + 1
+                if results[1] then
+                    local returns, replayable, capturedBytes = snapshotPackedValues(
+                        tailResults(results),
+                        call.capturedBytes
+                    )
+                    call.returns = returns
+                    call.replayable = call.replayable and replayable
+                    call.capturedBytes = capturedBytes
+                    hook:RefreshCallBytes(call)
+                    diagnostics.CallsForwarded = diagnostics.CallsForwarded + 1
+                else
+                    call.error = tostring(results[2])
+                    diagnostics.ForwardErrors = diagnostics.ForwardErrors + 1
+                end
+
+                emitCall(hook, call)
+            end)
+
+            if not finalized then
+                diagnostics.CaptureErrors = diagnostics.CaptureErrors + 1
+
+                if type(warn) == "function" then
+                    warn("[Hydroxide] ClosureSpy return capture failed: " .. tostring(finalizationError))
+                end
             end
-
-            emitCall(hook, call)
         end
 
         if not results[1] then
@@ -753,6 +1116,7 @@ function Hook.clear(hook)
     hook.Calls = 0
     hook.DroppedLogs = 0
     hook.Logs:Clear()
+    hook.HistoryBytes = 0
 end
 
 function Hook.block(hook)
@@ -763,30 +1127,121 @@ function Hook.ignore(hook)
     hook.Ignored = not hook.Ignored
 end
 
+local buffersEqual
+
 local function addArgCondition(storage, index, value, byType)
+    index = tonumber(index)
+
+    if not index or index ~= index or index == math.huge or index == -math.huge or index < 1 or index % 1 ~= 0 then
+        return false, "Argument index must be a positive integer"
+    end
+
     local condition = storage[index]
 
     if not condition then
         condition = {
             types = {},
-            values = {}
+            values = {},
+            nan = false
         }
         storage[index] = condition
     end
 
-    if byType then
-        condition.types[value] = true
+    if byType or value == nil then
+        local valueType = byType and value or "nil"
+
+        if type(valueType) ~= "string" or valueType == "" then
+            return false, "Condition type must be a non-empty string"
+        elseif condition.types[valueType] then
+            return false, "Condition already exists"
+        end
+
+        condition.types[valueType] = true
+    elseif type(value) == "number" and value ~= value then
+        if condition.nan then
+            return false, "Condition already exists"
+        end
+
+        condition.nan = true
     else
+        if typeof(value) == "buffer" then
+            for expected in pairs(condition.values) do
+                if typeof(expected) == "buffer" and buffersEqual(expected, value) then
+                    return false, "Condition already exists"
+                end
+            end
+        end
+
+        if condition.values[value] ~= nil then
+            return false, "Condition already exists"
+        end
+
         condition.values[value] = true
     end
+
+    return true
 end
 
 function Hook.blockArg(hook, index, value, byType)
-    addArgCondition(hook.BlockedArgs, index, value, byType)
+    return addArgCondition(hook.BlockedArgs, index, value, byType)
 end
 
 function Hook.ignoreArg(hook, index, value, byType)
-    addArgCondition(hook.IgnoredArgs, index, value, byType)
+    return addArgCondition(hook.IgnoredArgs, index, value, byType)
+end
+
+buffersEqual = function(left, right)
+    if left == right then
+        return true
+    elseif typeof(left) ~= "buffer" or typeof(right) ~= "buffer" or not buffer then
+        return false
+    elseif type(buffer.len) ~= "function" or type(buffer.readu8) ~= "function" then
+        return false
+    end
+
+    local maximum = 4096
+
+    if oh and oh.Settings then
+        maximum = tonumber(oh.Settings.MaxConditionBufferBytes or oh.Settings.maxConditionBufferBytes) or maximum
+    end
+
+    local ran, matches = pcall(function()
+        local leftLength = buffer.len(left)
+        local rightLength = buffer.len(right)
+
+        if leftLength ~= rightLength or leftLength > maximum then
+            return false
+        end
+
+        for offset = 0, leftLength - 1 do
+            if buffer.readu8(left, offset) ~= buffer.readu8(right, offset) then
+                return false
+            end
+        end
+
+        return true
+    end)
+
+    return ran and matches == true
+end
+
+
+local function matchesConditionValues(condition, value)
+    if value == nil then
+        return false
+    elseif type(value) == "number" and value ~= value then
+        return condition.nan == true
+    elseif condition.values[value] ~= nil then
+        return true
+    elseif typeof(value) == "buffer" then
+        for expected in pairs(condition.values) do
+            if typeof(expected) == "buffer" and buffersEqual(expected, value) then
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
 local function matchesArgCondition(storage, args)
@@ -795,7 +1250,7 @@ local function matchesArgCondition(storage, args)
         local condition = storage[index]
 
         if condition
-            and (condition.types[typeof(value)] or (value ~= nil and condition.values[value] ~= nil))
+            and (condition.types[typeof(value)] or matchesConditionValues(condition, value))
         then
             return true
         end
@@ -816,15 +1271,31 @@ function Hook.incrementCalls(hook, call)
     hook.Calls = hook.Calls + 1
     local dropped = hook.Logs:Push(call)
 
-    if dropped ~= nil then
-        hook.DroppedLogs = hook.DroppedLogs + 1
-        return dropped
+    if dropped > 0 then
+        hook.DroppedLogs = hook.DroppedLogs + dropped
+        diagnostics.LogsDropped = diagnostics.LogsDropped + dropped
     end
+
+    hook.HistoryBytes = hook.Logs:Bytes()
+    return dropped
+end
+
+function Hook.refreshCallBytes(hook, call)
+    local dropped = hook.Logs:RefreshBytes(call)
+
+    if dropped > 0 then
+        hook.DroppedLogs = hook.DroppedLogs + dropped
+        diagnostics.LogsDropped = diagnostics.LogsDropped + dropped
+    end
+
+    hook.HistoryBytes = hook.Logs:Bytes()
+    return dropped
 end
 
 function Hook.decrementCalls(hook, call)
     if hook.Logs:Remove(call) then
         hook.Calls = math.max(0, hook.Calls - 1)
+        hook.HistoryBytes = hook.Logs:Bytes()
     end
 end
 
