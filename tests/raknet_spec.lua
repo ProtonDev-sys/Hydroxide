@@ -131,6 +131,27 @@ local function install(settings)
 		}
 end
 
+local defaultSpy, defaultHarness = install({
+	MaxRakNetLogs = 0,
+	MaxRakNetPacketBytes = 32,
+	MaxRakNetHistoryBytes = 0,
+})
+
+for index = 1, 525 do
+	defaultHarness.SendHooks[1](makePacket("D", { PacketId = index % 3 }))
+end
+
+assertEqual(#defaultSpy.Logs, 525, "default history has no implicit count eviction")
+assertEqual(defaultSpy.Retention.MaxLogs, nil, "default count retention is Clear-only")
+assertEqual(defaultSpy.Retention.MaxHistoryBytes, nil, "default byte retention is Clear-only")
+assertEqual(defaultSpy.Diagnostics.LogsDropped, 0, "default retention drops no captures")
+assertEqual(#defaultSpy.SendLogs, 525, "all-send index retains complete default history")
+assertEqual(#defaultSpy.ReceiveLogs, 0, "all-receive index remains direction-specific")
+local defaultGroup = defaultSpy.PacketGroups[defaultSpy.PacketIdKey(1)]
+assertEqual(defaultGroup.Count, 175, "packet-ID index is updated incrementally")
+assertEqual(#defaultGroup.Logs, 175, "packet-ID log index retains every matching capture")
+assertEqual(#defaultGroup.SendLogs, 175, "packet-ID direction index retains matching sends")
+
 local spy, harness = install({
 	MaxRakNetLogs = 2,
 	MaxRakNetPacketBytes = 32,
@@ -254,6 +275,11 @@ assertEqual(#spy.Logs, 2, "count bound maintained")
 assertEqual(spy.Logs[1], receiveLog, "count eviction removes oldest entry")
 assertEqual(spy.Logs[2].PayloadBytes, "C1", "count eviction retains newest entry")
 assertEqual(spy.Diagnostics.LogsDropped, 1, "count eviction diagnosed")
+assertEqual(events[#events - 1].Action, "removed", "count eviction emits removal before replacement")
+assertEqual(events[#events - 1].Entry, binaryLog, "eviction event identifies the released snapshot")
+assertEqual(events[#events].Action, "added", "replacement add follows its eviction event")
+assertEqual(spy.PacketGroups[spy.PacketIdKey(0)], nil, "evicted packet-ID group releases its index")
+assertEqual(#spy.SendLogs, 1, "direction index releases explicitly evicted snapshots")
 
 spy.Pause()
 harness.SendHooks[1](makePacket("PA"))
@@ -265,6 +291,9 @@ eventConnection:Disconnect()
 spy.Clear()
 assertEqual(#spy.Logs, 0, "clear removes captured packets")
 assertEqual(spy.Diagnostics.HistoryBytes, 0, "clear resets retained byte count")
+assertEqual(#spy.SendLogs, 0, "clear resets send index")
+assertEqual(#spy.ReceiveLogs, 0, "clear resets receive index")
+assertEqual(#spy.PacketGroupList, 0, "clear resets packet-ID navigator index")
 
 local sendCallback = harness.SendHooks[1]
 local receiveCallback = harness.ReceiveHooks[1]
@@ -368,9 +397,68 @@ assertEqual(pcall(listenerHarness.SendHooks[1], makePacket("EV")), true, "listen
 assertEqual(#listenerSpy.Logs, 1, "listener error does not lose capture")
 assertEqual(listenerSpy.Diagnostics.EventErrors, 1, "listener error diagnosed")
 
+local ignoreSpy, ignoreHarness = install({
+	MaxRakNetPacketBytes = 8,
+})
+local beforeIgnorePacket = makePacket("BE", { PacketId = 42 })
+ignoreHarness.SendHooks[1](beforeIgnorePacket)
+local retainedBeforeIgnore = ignoreSpy.Logs[1]
+assertEqual(ignoreSpy:IgnorePacketId(42), true, "packet ID can be ignored")
+assertEqual(ignoreSpy:IsPacketIdIgnored(42), true, "ignored packet ID state is queryable")
+local ignoredPacket, _, ignoredReads = makePacket("IG", { PacketId = 42 })
+ignoreHarness.SendHooks[1](ignoredPacket)
+ignoreHarness.ReceiveHooks[1](makePacket("IR", { PacketId = 42 }))
+assertEqual(#ignoreSpy.Logs, 1, "ignore stops retaining future matching packets")
+assertEqual(ignoreSpy.Logs[1], retainedBeforeIgnore, "ignore preserves existing history")
+assertEqual(ignoredReads.PacketId, 1, "ignored packet reads only its ID")
+assertEqual(ignoredReads.AsBuffer, nil, "ignored packet payload is not materialized")
+assertEqual(ignoreSpy.Diagnostics.PacketsSkippedIgnored, 2, "ignore applies to both packet directions")
+ignoreHarness.SendHooks[1](makePacket("OT", { PacketId = 43 }))
+assertEqual(#ignoreSpy.Logs, 2, "ignore leaves other packet IDs captureable")
+assertEqual(ignoreSpy:UnignorePacketId(42), false, "packet ID can be unignored")
+ignoreHarness.ReceiveHooks[1](makePacket("UN", { PacketId = 42 }))
+assertEqual(#ignoreSpy.Logs, 3, "unignored packet ID resumes capture")
+ignoreSpy:IgnorePacketId(42)
+ignoreSpy:Clear()
+assertEqual(#ignoreSpy.Logs, 0, "Clear removes all retained history")
+assertEqual(ignoreSpy:IsPacketIdIgnored(42), true, "Clear does not silently reset ignore filters")
+assertEqual(ignoreSpy:ClearIgnoredPacketIds(), true, "ignored packet filters can be cleared explicitly")
+assertEqual(ignoreSpy:IsPacketIdIgnored(42), false, "clear ignored restores packet capture")
+assertEqual(ignoreSpy:ClearIgnoredPacketIds(), false, "clearing an empty ignore set is a no-op")
+
+local stressSpy, stressHarness = install({
+	MaxRakNetLogs = 3,
+	MaxRakNetPacketBytes = 8,
+})
+
+for index = 1, 2500 do
+	local packet = makePacket("S", { PacketId = 77 })
+
+	if index % 2 == 0 then
+		stressHarness.SendHooks[1](packet)
+	else
+		stressHarness.ReceiveHooks[1](packet)
+	end
+end
+
+local stressGroup = stressSpy.PacketGroups[stressSpy.PacketIdKey(77)]
+assertEqual(#stressSpy.Logs, 3, "long-running capped history keeps its configured size")
+assertEqual(stressSpy.Logs[1].Sequence, 2498, "history remains ordered after density compaction")
+assertEqual(stressSpy.Logs[3].Sequence, 2500, "history keeps the newest entry after density compaction")
+assertEqual(#stressSpy.SendLogs, 2, "send index remains ordered through compaction")
+assertEqual(#stressSpy.ReceiveLogs, 1, "receive index remains ordered through compaction")
+assertEqual(#stressGroup.Logs, 3, "packet-ID index remains bounded through compaction")
+assertEqual(#stressGroup.SendLogs, 2, "packet-ID send index survives compaction")
+assertEqual(#stressGroup.ReceiveLogs, 1, "packet-ID receive index survives compaction")
+assertEqual(stressSpy.Diagnostics.LogsDropped, 2497, "stress eviction count remains exact")
+assertEqual(stressSpy.Diagnostics.HistoryCompactions > 0, true, "capped history periodically repacks tombstones")
+
+defaultSpy.Disconnect()
 byteSpy.Disconnect()
 listenerSpy.Disconnect()
 budgetSpy.Disconnect()
 genericBudgetSpy.Disconnect()
+ignoreSpy.Disconnect()
+stressSpy.Disconnect()
 
 print("raknet_spec.lua: ok")

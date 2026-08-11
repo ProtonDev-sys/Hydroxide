@@ -17,6 +17,9 @@ local icons = {
 	copy = "rbxassetid://4891705738",
 	replay = "rbxassetid://4907151581",
 	diagnostics = "rbxassetid://4909102841",
+	ignore = "rbxassetid://4842578510",
+	unignore = "rbxassetid://4842578818",
+	packet = "rbxassetid://4229806545",
 }
 
 local colours = {
@@ -34,15 +37,14 @@ local colours = {
 	border = Color3.fromRGB(58, 58, 58),
 	send = Color3.fromRGB(105, 196, 255),
 	receive = Color3.fromRGB(197, 139, 255),
-	warning = Color3.fromRGB(238, 178, 69),
-	error = Color3.fromRGB(240, 105, 105),
-	good = Color3.fromRGB(113, 211, 137),
+	ignored = Color3.fromRGB(238, 178, 69),
 }
 
 local ROW_HEIGHT = 42
 local ROW_GAP = 3
 local TOP_PIN_THRESHOLD = 8
 local DEFAULT_RENDER_LIMIT = 150
+local ACTION_COUNT = 10
 local DEFAULT_TEXT_PREVIEW = 2048
 local DEFAULT_HEX_PREVIEW = 1024
 local DEFAULT_ARRAY_PREVIEW = 256
@@ -259,54 +261,91 @@ Page.ZIndex = 1
 Page.Parent = Pages
 trackInstance(Page)
 
-local warning = Instance.new("TextLabel")
-warning.Name = "RakNetWarning"
-warning.BackgroundColor3 = Color3.fromRGB(45, 37, 22)
-warning.BorderSizePixel = 0
-warning.Font = Enum.Font.SourceSans
-warning.Position = UDim2.new(0, 6, 0, 5)
-warning.Size = UDim2.new(1, -12, 0, 44)
-warning.Text = ""
-warning.TextColor3 = colours.warning
-warning.TextSize = 14
-warning.TextWrapped = true
-warning.TextXAlignment = Enum.TextXAlignment.Left
-warning.TextYAlignment = Enum.TextYAlignment.Center
-warning.ZIndex = 2
-warning.Parent = Page
-addCorner(warning, 4)
-addStroke(warning, Color3.fromRGB(87, 69, 35))
-
-local warningPadding = Instance.new("UIPadding")
-warningPadding.PaddingLeft = UDim.new(0, 10)
-warningPadding.PaddingRight = UDim.new(0, 10)
-warningPadding.Parent = warning
-
 local toolbar = Instance.new("Frame")
 toolbar.Name = "Actions"
 toolbar.BackgroundTransparency = 1
 toolbar.BorderSizePixel = 0
-toolbar.Position = UDim2.new(0, 6, 0, 54)
+toolbar.Position = UDim2.new(0, 6, 0, 6)
 toolbar.Size = UDim2.new(1, -12, 0, 29)
 toolbar.ZIndex = 2
 toolbar.Parent = Page
 
 local toolbarLayout = Instance.new("UIGridLayout")
 toolbarLayout.CellPadding = UDim2.new(0, 4, 0, 4)
-toolbarLayout.CellSize = UDim2.new(0.125, -4, 1, 0)
+toolbarLayout.CellSize = UDim2.new(0.1, -4, 1, 0)
 toolbarLayout.FillDirection = Enum.FillDirection.Horizontal
-toolbarLayout.FillDirectionMaxCells = 8
+toolbarLayout.FillDirectionMaxCells = ACTION_COUNT
 toolbarLayout.SortOrder = Enum.SortOrder.LayoutOrder
 toolbarLayout.Parent = toolbar
+
+local workspace = Instance.new("Frame")
+workspace.Name = "Workspace"
+workspace.BackgroundTransparency = 1
+workspace.BorderSizePixel = 0
+workspace.Position = UDim2.new(0, 6, 0, 40)
+workspace.Size = UDim2.new(1, -12, 1, -70)
+workspace.ZIndex = 2
+workspace.Parent = Page
+
+local navigator = Instance.new("Frame")
+navigator.Name = "PacketIds"
+navigator.BackgroundColor3 = colours.panel
+navigator.BorderSizePixel = 0
+navigator.Position = UDim2.new()
+navigator.Size = UDim2.new(0, 188, 1, 0)
+navigator.ZIndex = 2
+navigator.Parent = workspace
+addCorner(navigator, 4)
+addStroke(navigator)
+
+local navigatorTitle = makeLabel(navigator, "Title", "Packet IDs", UDim2.new(0, 10, 0, 2), UDim2.new(1, -20, 0, 27), 13)
+navigatorTitle.Font = Enum.Font.SourceSansSemibold
+navigatorTitle.TextColor3 = colours.muted
+
+local navigatorScroll = Instance.new("ScrollingFrame")
+navigatorScroll.Name = "Groups"
+navigatorScroll.Active = true
+navigatorScroll.BackgroundTransparency = 1
+navigatorScroll.BorderSizePixel = 0
+navigatorScroll.BottomImage = ""
+navigatorScroll.CanvasSize = UDim2.new()
+navigatorScroll.MidImage = ""
+navigatorScroll.Position = UDim2.new(0, 4, 0, 30)
+navigatorScroll.ScrollBarImageColor3 = Color3.fromRGB(95, 95, 95)
+navigatorScroll.ScrollBarThickness = 5
+navigatorScroll.Size = UDim2.new(1, -8, 1, -34)
+navigatorScroll.TopImage = ""
+navigatorScroll.ZIndex = 3
+navigatorScroll.Parent = navigator
+
+local navigatorPadding = Instance.new("UIPadding")
+navigatorPadding.PaddingBottom = UDim.new(0, 4)
+navigatorPadding.PaddingLeft = UDim.new(0, 2)
+navigatorPadding.PaddingRight = UDim.new(0, 3)
+navigatorPadding.Parent = navigatorScroll
+
+local navigatorLayout = Instance.new("UIListLayout")
+navigatorLayout.Padding = UDim.new(0, 3)
+navigatorLayout.SortOrder = Enum.SortOrder.LayoutOrder
+navigatorLayout.Parent = navigatorScroll
+
+local mainPanel = Instance.new("Frame")
+mainPanel.Name = "PacketHistory"
+mainPanel.BackgroundTransparency = 1
+mainPanel.BorderSizePixel = 0
+mainPanel.Position = UDim2.new(0, 194, 0, 0)
+mainPanel.Size = UDim2.new(1, -194, 1, 0)
+mainPanel.ZIndex = 2
+mainPanel.Parent = workspace
 
 local filters = Instance.new("Frame")
 filters.Name = "Filters"
 filters.BackgroundTransparency = 1
 filters.BorderSizePixel = 0
-filters.Position = UDim2.new(0, 6, 0, 88)
-filters.Size = UDim2.new(1, -12, 0, 29)
+filters.Position = UDim2.new()
+filters.Size = UDim2.new(1, 0, 0, 29)
 filters.ZIndex = 2
-filters.Parent = Page
+filters.Parent = mainPanel
 
 local function makeFilterButton(name, text, position, width)
 	local button = Instance.new("TextButton")
@@ -327,8 +366,8 @@ local function makeFilterButton(name, text, position, width)
 	return button
 end
 
-local sendFilter = makeFilterButton("Send", "Send  ON", UDim2.new(), 88)
-local receiveFilter = makeFilterButton("Receive", "Receive  ON", UDim2.new(0, 93, 0, 0), 98)
+local sendFilter = makeFilterButton("Send", "Send  ON", UDim2.new(), 78)
+local receiveFilter = makeFilterButton("Receive", "Receive  ON", UDim2.new(0, 83, 0, 0), 88)
 
 local search = Instance.new("TextBox")
 search.Name = "Search"
@@ -338,8 +377,8 @@ search.ClearTextOnFocus = false
 search.Font = Enum.Font.SourceSans
 search.PlaceholderColor3 = colours.muted
 search.PlaceholderText = "Filter by packet ID or captured payload text ..."
-search.Position = UDim2.new(0, 196, 0, 0)
-search.Size = UDim2.new(1, -196, 1, 0)
+search.Position = UDim2.new(0, 176, 0, 0)
+search.Size = UDim2.new(1, -176, 1, 0)
 search.Text = ""
 search.TextColor3 = colours.text
 search.TextSize = 14
@@ -358,10 +397,10 @@ local header = Instance.new("Frame")
 header.Name = "Header"
 header.BackgroundColor3 = colours.panel
 header.BorderSizePixel = 0
-header.Position = UDim2.new(0, 6, 0, 122)
-header.Size = UDim2.new(1, -12, 0, 23)
+header.Position = UDim2.new(0, 0, 0, 34)
+header.Size = UDim2.new(1, 0, 0, 23)
 header.ZIndex = 2
-header.Parent = Page
+header.Parent = mainPanel
 addCorner(header, 3)
 
 local directionHeader = makeLabel(header, "Direction", "Direction", UDim2.new(0, 8, 0, 0), UDim2.new(0.1, -8, 1, 0), 13)
@@ -384,13 +423,13 @@ scroll.BottomImage = ""
 scroll.CanvasPosition = Vector2.new()
 scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 scroll.MidImage = ""
-scroll.Position = UDim2.new(0, 6, 0, 150)
+scroll.Position = UDim2.new(0, 0, 0, 62)
 scroll.ScrollBarImageColor3 = Color3.fromRGB(95, 95, 95)
 scroll.ScrollBarThickness = 7
-scroll.Size = UDim2.new(1, -12, 1, -180)
+scroll.Size = UDim2.new(1, 0, 1, -62)
 scroll.TopImage = ""
 scroll.ZIndex = 2
-scroll.Parent = Page
+scroll.Parent = mainPanel
 addCorner(scroll, 4)
 addStroke(scroll)
 
@@ -407,8 +446,30 @@ rowsLayout.SortOrder = Enum.SortOrder.LayoutOrder
 rowsLayout.Parent = scroll
 
 local footer =
-	makeLabel(Page, "Footer", "No RakNet packets captured", UDim2.new(0, 8, 1, -27), UDim2.new(1, -16, 0, 22), 14)
+	makeLabel(Page, "Footer", "No RakNet packets captured", UDim2.new(0, 8, 1, -27), UDim2.new(1, -210, 0, 22), 14)
 footer.TextColor3 = colours.muted
+
+local function makePageButton(name, text, position)
+	local button = Instance.new("TextButton")
+	button.Name = name
+	button.AutoButtonColor = false
+	button.BackgroundColor3 = colours.button
+	button.BorderSizePixel = 0
+	button.Font = Enum.Font.SourceSans
+	button.Position = position
+	button.Size = UDim2.new(0, 92, 0, 22)
+	button.Text = text
+	button.TextColor3 = colours.text
+	button.TextSize = 13
+	button.ZIndex = 3
+	button.Parent = Page
+	addCorner(button, 4)
+	addStroke(button)
+	return button
+end
+
+local newerPage = makePageButton("NewerPage", "‹  Newer", UDim2.new(1, -198, 1, -27))
+local olderPage = makePageButton("OlderPage", "Older  ›", UDim2.new(1, -101, 1, -27))
 
 local function updateResponsiveLayout()
 	if not alive or not Page.Parent then
@@ -416,45 +477,53 @@ local function updateResponsiveLayout()
 	end
 
 	local pageWidth = Page.AbsoluteSize.X
-	local compactWidth = pageWidth > 0 and pageWidth < 900
-	local warningHeight = compactWidth and 62 or 44
-	local toolbarTop = warningHeight + 10
-	local toolbarColumns = compactWidth and 4 or 8
-	local toolbarRows = math.ceil(8 / toolbarColumns)
+	local compactWidth = pageWidth > 0 and pageWidth < 760
+	local toolbarColumns = pageWidth >= 1180 and 10 or (pageWidth >= 650 and 5 or 4)
+	local toolbarRows = math.ceil(ACTION_COUNT / toolbarColumns)
 	local toolbarHeight = toolbarRows * 29 + math.max(0, toolbarRows - 1) * 4
 	local toolbarWidth = math.max(1, pageWidth - 12)
-	local toolbarCellWidth = math.max(88, math.floor((toolbarWidth - (toolbarColumns - 1) * 4) / toolbarColumns))
-	local filtersTop = toolbarTop + toolbarHeight + 5
-	local headerTop = filtersTop + 34
-	local scrollTop = headerTop + 28
+	local toolbarCellWidth = math.max(66, math.floor((toolbarWidth - (toolbarColumns - 1) * 4) / toolbarColumns))
+	local workspaceTop = 6 + toolbarHeight + 5
+	local navigatorWidth = compactWidth and 142 or 188
 
-	warning.Size = UDim2.new(1, -12, 0, warningHeight)
-	toolbar.Position = UDim2.new(0, 6, 0, toolbarTop)
+	toolbar.Position = UDim2.new(0, 6, 0, 6)
 	toolbar.Size = UDim2.new(1, -12, 0, toolbarHeight)
 	toolbarLayout.FillDirectionMaxCells = toolbarColumns
 	toolbarLayout.CellSize = UDim2.new(0, toolbarCellWidth, 0, 29)
-	filters.Position = UDim2.new(0, 6, 0, filtersTop)
-	header.Position = UDim2.new(0, 6, 0, headerTop)
-	scroll.Position = UDim2.new(0, 6, 0, scrollTop)
-	scroll.Size = UDim2.new(1, -12, 1, -(scrollTop + 30))
+	workspace.Position = UDim2.new(0, 6, 0, workspaceTop)
+	workspace.Size = UDim2.new(1, -12, 1, -(workspaceTop + 30))
+	navigator.Size = UDim2.new(0, navigatorWidth, 1, 0)
+	mainPanel.Position = UDim2.new(0, navigatorWidth + 6, 0, 0)
+	mainPanel.Size = UDim2.new(1, -(navigatorWidth + 6), 1, 0)
 end
 
 trackConnection(Page:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateResponsiveLayout))
+trackConnection(navigatorLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	navigatorScroll.CanvasSize = UDim2.new(0, 0, 0, navigatorLayout.AbsoluteContentSize.Y + 8)
+end))
 task.defer(updateResponsiveLayout)
 
 local selectedEntry
+local selectedPacketKey
 local activeViewer
 local viewerGeneration = 0
 local rows = {}
+local navigatorButtons = {}
 local showSend = true
 local showReceive = true
 local renderQueued = false
 local forceTopOnRender = true
 local followingTop = true
 local settingCanvasPosition = false
-local renderedCount = 0
-local searchCache = setmetatable({}, { __mode = "k" })
-local renderDirty = true
+local windowStart = 1
+local activeQuery = ""
+local searchResults = {}
+local searchResultHead = 1
+local searchResultTail = 0
+local queueRender
+local rebuildSearchResults
+local selectPacketGroup
+local clearNavigatorButtons
 
 local actionButtons = {}
 
@@ -476,6 +545,10 @@ function lifecycle:Disconnect()
 	end
 
 	activeViewer = nil
+
+	if clearNavigatorButtons then
+		clearNavigatorButtons(false)
+	end
 end
 
 trackConnection(lifecycle)
@@ -761,6 +834,10 @@ end
 local function describeDiagnostics()
 	local capabilities = Methods.Capabilities or {}
 	local diagnostics = Methods.Diagnostics or {}
+	local retention = Methods.Retention or {}
+	local function retentionText(value)
+		return type(value) == "number" and safeString(value) or "unlimited (Clear only)"
+	end
 	local lines = {
 		"RAKNET SPY DIAGNOSTICS",
 		"",
@@ -770,6 +847,12 @@ local function describeDiagnostics()
 		"Receive hook: " .. capabilityState(capabilities, "ReceiveHook", "ReceiveHookInstalled"),
 		"raknet.send: " .. (capabilities.Send and "available" or "unavailable"),
 		"Buffer snapshot APIs: " .. (capabilities.Buffer and "available" or "unavailable"),
+		"",
+		"HISTORY RETENTION",
+		"  Entry limit: " .. retentionText(retention.MaxLogs),
+		"  Total payload-byte limit: " .. retentionText(retention.MaxHistoryBytes),
+		"  Per-packet payload limit: " .. safeString(retention.MaxPacketBytes),
+		"  The list is windowed for display; hidden rows remain captured until Clear.",
 		"",
 		"CAPTURE COUNTERS",
 	}
@@ -803,8 +886,32 @@ local function describeDiagnostics()
 		end
 	end
 
+	local ignoredPacketIds = {}
+
+	for _, record in pairs(Methods.IgnoredPacketIds or {}) do
+		ignoredPacketIds[#ignoredPacketIds + 1] = safeString(record.PacketId)
+	end
+
+	table.sort(ignoredPacketIds)
 	lines[#lines + 1] = ""
-	lines[#lines + 1] = "POTASSIUM WARNING"
+	lines[#lines + 1] = ("IGNORED PACKET IDS (%d)"):format(#ignoredPacketIds)
+
+	if #ignoredPacketIds == 0 then
+		lines[#lines + 1] = "  (none)"
+	else
+		local shown = math.min(#ignoredPacketIds, 128)
+
+		for index = 1, shown do
+			lines[#lines + 1] = "  " .. ignoredPacketIds[index]
+		end
+
+		if shown < #ignoredPacketIds then
+			lines[#lines + 1] = ("  ... %d more ..."):format(#ignoredPacketIds - shown)
+		end
+	end
+
+	lines[#lines + 1] = ""
+	lines[#lines + 1] = "AVAILABILITY AND SAFETY"
 	lines[#lines + 1] =
 		"Enable RakNet in Potassium's Miscellaneous options before use. Potassium warns that RakNet interception can result in a ban. Use only in experiences you own or are authorised to test."
 	lines[#lines + 1] = "Docs: https://docs.potassium.pro/api-reference/RakNet%20Library/"
@@ -976,28 +1083,7 @@ local function showDiagnostics()
 	showViewer("RakNet Diagnostics", describeDiagnostics())
 end
 
-local function updateWarning()
-	local capabilities = Methods.Capabilities or {}
-	local sendInstalled = capabilities.SendHookInstalled == true
-	local receiveInstalled = capabilities.ReceiveHookInstalled == true
-	local state
-
-	if sendInstalled and receiveInstalled then
-		state = Methods.Enabled and "SEND + RECEIVE CAPTURE ACTIVE" or "CAPTURE PAUSED"
-		warning.TextColor3 = Methods.Enabled and colours.good or colours.warning
-	elseif sendInstalled then
-		state = "PARTIAL SUPPORT: SEND CAPTURE ONLY"
-		warning.TextColor3 = colours.warning
-	elseif receiveInstalled then
-		state = "PARTIAL SUPPORT: RECEIVE CAPTURE ONLY"
-		warning.TextColor3 = colours.warning
-	else
-		state = "RAKNET UNAVAILABLE"
-		warning.TextColor3 = colours.error
-	end
-
-	warning.Text = state
-		.. "  •  Potassium warning: enable RakNet in Miscellaneous options; interception/replay can result in a ban. Use only where authorised."
+local function updateCaptureControls()
 	setButtonText(actionButtons.Pause, Methods.Enabled and "Pause" or "Resume")
 	setButtonEnabled(actionButtons.Pause, Methods.Connected == true)
 end
@@ -1014,11 +1100,20 @@ local function updateSelectionStyles()
 	end
 end
 
+local function selectedPacketIdForAction()
+	local group = selectedPacketKey and Methods.PacketGroups[selectedPacketKey] or nil
+	return group and group.PacketId or (selectedEntry and selectedEntry.PacketId or nil)
+end
+
 local function updateActions()
 	local hasSelection = selectedEntry ~= nil
 	local bytes = hasSelection and payloadBytes(selectedEntry) or nil
+	local selectedPacketId = selectedPacketIdForAction()
+	local ignored = selectedPacketId ~= nil and Methods.IsPacketIdIgnored(selectedPacketId) or false
 
 	setButtonEnabled(actionButtons.Clear, #Methods.Logs > 0)
+	setButtonEnabled(actionButtons.Ignore, selectedPacketId ~= nil)
+	setButtonEnabled(actionButtons.ClearIgnored, next(Methods.IgnoredPacketIds) ~= nil)
 	setButtonEnabled(actionButtons.Details, hasSelection)
 	setButtonEnabled(actionButtons.Hex, type(bytes) == "string")
 	setButtonEnabled(actionButtons.Code, hasSelection)
@@ -1028,6 +1123,8 @@ local function updateActions()
 		hasSelection and selectedEntry.Direction == "send" and selectedEntry.Replayable == true
 	)
 	setButtonEnabled(actionButtons.Diagnostics, true)
+	setButtonText(actionButtons.Ignore, ignored and "Unignore ID" or "Ignore ID")
+	actionButtons.Ignore.Icon.Image = ignored and icons.unignore or icons.ignore
 
 	if hasSelection and selectedEntry.Direction == "receive" then
 		setButtonText(actionButtons.Code, "Receive Template")
@@ -1139,87 +1236,278 @@ local function fillRow(row, entry, displayIndex)
 		or (displayIndex % 2 == 0 and colours.rowAlternate or colours.row)
 end
 
-local function matchesFilters(entry, query)
-	if entry.Direction == "send" and not showSend then
+local EMPTY_LOGS = {}
+local ALL_NAVIGATOR_KEY = {}
+
+local function currentSource()
+	local group = selectedPacketKey and Methods.PacketGroups[selectedPacketKey] or nil
+
+	if selectedPacketKey and not group then
+		selectedPacketKey = nil
+		windowStart = 1
+	end
+
+	if not showSend and not showReceive then
+		return EMPTY_LOGS
+	elseif showSend and showReceive then
+		return group and group.Logs or Methods.Logs
+	elseif showSend then
+		return group and group.SendLogs or Methods.SendLogs
+	end
+
+	return group and group.ReceiveLogs or Methods.ReceiveLogs
+end
+
+local function entryBelongsToCurrentSource(entry)
+	if not entry then
+		return false
+	elseif entry.Direction == "send" and not showSend then
 		return false
 	elseif entry.Direction == "receive" and not showReceive then
 		return false
-	elseif query == "" then
+	elseif selectedPacketKey and Methods.PacketIdKey(entry.PacketId) ~= selectedPacketKey then
+		return false
+	end
+
+	return true
+end
+
+local function matchesQuery(entry, query)
+	if query == "" then
 		return true
 	end
 
-	local searchable = searchCache[entry]
-
-	if not searchable then
-		local bytes = payloadBytes(entry)
-		local searchLimit = settingNumber({ "MaxRakNetSearchBytes" }, 4096, 64, 65536)
-		searchable = table
-			.concat({
-				safeString(entry.PacketId),
-				safeString(entry.Direction),
-				safeString(entry.Priority),
-				safeString(entry.Reliability),
-				safeString(entry.OrderingChannel),
-				safeString(entry.PayloadState),
-				type(bytes) == "string" and bytes:sub(1, searchLimit) or "",
-			}, " ")
-			:lower()
-		searchCache[entry] = searchable
-	end
+	local bytes = payloadBytes(entry)
+	local searchLimit = settingNumber({ "MaxRakNetSearchBytes" }, 4096, 64, 65536)
+	local searchable = table
+		.concat({
+			safeString(entry.PacketId),
+			safeString(entry.Direction),
+			safeString(entry.Priority),
+			safeString(entry.Reliability),
+			safeString(entry.OrderingChannel),
+			safeString(entry.PayloadState),
+			type(bytes) == "string" and bytes:sub(1, searchLimit) or "",
+		}, " ")
+		:lower()
 
 	return searchable:find(query, 1, true) ~= nil
 end
 
-local function selectionIsRetained(entry, total)
-	if not entry or total <= 0 then
-		return false
+local function revalidateSelectedEntry()
+	if selectedEntry
+		and (not entryBelongsToCurrentSource(selectedEntry) or not matchesQuery(selectedEntry, activeQuery))
+	then
+		selectedEntry = nil
+		hideViewer()
+	end
+end
+
+local function resetSearchResults()
+	searchResults = {}
+	searchResultHead = 1
+	searchResultTail = 0
+end
+
+local function clearRenderedRows()
+	for _, row in ipairs(rows) do
+		row.Entry = nil
+		row.Button.Visible = false
+	end
+end
+
+local function searchResultCount()
+	return math.max(0, searchResultTail - searchResultHead + 1)
+end
+
+local function appendSearchResult(entry)
+	searchResultTail = searchResultTail + 1
+	searchResults[searchResultTail] = entry
+end
+
+local function removeOldestSearchResult(entry)
+	if searchResults[searchResultHead] ~= entry then
+		return
 	end
 
-	local sequence = tonumber(entry.Sequence)
-	local oldest = Methods.Logs[1]
-	local newest = Methods.Logs[total]
-	local oldestSequence = oldest and tonumber(oldest.Sequence)
-	local newestSequence = newest and tonumber(newest.Sequence)
+	searchResults[searchResultHead] = nil
+	searchResultHead = searchResultHead + 1
 
-	if sequence and oldestSequence and newestSequence then
-		return sequence >= oldestSequence and sequence <= newestSequence
+	if searchResultHead > searchResultTail then
+		resetSearchResults()
+	end
+end
+
+rebuildSearchResults = function()
+	resetSearchResults()
+
+	if activeQuery == "" then
+		return
 	end
 
-	for index = 1, total do
-		if Methods.Logs[index] == entry then
-			return true
+	local source = currentSource()
+
+	for index = 1, #source do
+		local entry = source[index]
+
+		if entry and matchesQuery(entry, activeQuery) then
+			appendSearchResult(entry)
+		end
+	end
+end
+
+local function makeNavigatorButton(key)
+	local button = Instance.new("TextButton")
+	button.Name = key == ALL_NAVIGATOR_KEY and "AllPackets" or "PacketId"
+	button.AutoButtonColor = false
+	button.BackgroundColor3 = colours.row
+	button.BorderSizePixel = 0
+	button.Size = UDim2.new(1, -1, 0, 44)
+	button.Text = ""
+	button.ZIndex = 4
+	button.Parent = navigatorScroll
+	addCorner(button, 3)
+
+	local icon = Instance.new("ImageLabel")
+	icon.Name = "Icon"
+	icon.BackgroundTransparency = 1
+	icon.Image = icons.packet
+	icon.ImageColor3 = colours.muted
+	icon.Position = UDim2.new(0, 7, 0, 7)
+	icon.Size = UDim2.new(0, 17, 0, 17)
+	icon.ZIndex = 5
+	icon.Parent = button
+
+	local title = makeLabel(button, "Title", "", UDim2.new(0, 30, 0, 2), UDim2.new(1, -35, 0, 22), 14)
+	title.Font = Enum.Font.SourceSansSemibold
+	title.ZIndex = 5
+
+	local count = makeLabel(button, "Count", "", UDim2.new(0, 30, 0, 21), UDim2.new(1, -35, 0, 19), 12)
+	count.TextColor3 = colours.muted
+	count.ZIndex = 5
+
+	local model = {
+		Button = button,
+		Connections = {},
+		Icon = icon,
+		Title = title,
+		Count = count,
+		Key = key,
+	}
+
+	model.Connections[#model.Connections + 1] = button.MouseEnter:Connect(function()
+		local selected = key == ALL_NAVIGATOR_KEY and selectedPacketKey == nil or key == selectedPacketKey
+
+		if not selected then
+			button.BackgroundColor3 = colours.buttonHover
+		end
+	end)
+	model.Connections[#model.Connections + 1] = button.MouseLeave:Connect(function()
+		local selected = key == ALL_NAVIGATOR_KEY and selectedPacketKey == nil or key == selectedPacketKey
+		button.BackgroundColor3 = selected and colours.rowSelected or colours.row
+	end)
+	model.Connections[#model.Connections + 1] = button.MouseButton1Click:Connect(function()
+		selectPacketGroup(key == ALL_NAVIGATOR_KEY and nil or key)
+	end)
+	navigatorButtons[key] = model
+	return model
+end
+
+local function destroyNavigatorButton(key)
+	local model = navigatorButtons[key]
+
+	if not model then
+		return
+	end
+
+	navigatorButtons[key] = nil
+
+	for _, connection in ipairs(model.Connections or {}) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+
+	if model.Button then
+		model.Button:Destroy()
+	end
+end
+
+clearNavigatorButtons = function(keepAll)
+	local stale = {}
+
+	for key in pairs(navigatorButtons) do
+		if not keepAll or key ~= ALL_NAVIGATOR_KEY then
+			stale[#stale + 1] = key
 		end
 	end
 
-	return false
+	for _, key in ipairs(stale) do
+		destroyNavigatorButton(key)
+	end
+end
+
+local function fillNavigatorButton(model, title, count, detail, ignored, layoutOrder, selected)
+	model.Button.LayoutOrder = layoutOrder
+	model.Button.Visible = true
+	model.Button.BackgroundColor3 = selected and colours.rowSelected or colours.row
+	model.Icon.ImageColor3 = ignored and colours.ignored or colours.muted
+	model.Title.Text = title
+	model.Title.TextColor3 = ignored and colours.ignored or colours.text
+	model.Count.Text = ("%s packet%s • %s"):format(count, count == 1 and "" or "s", detail)
+end
+
+local function refreshNavigator()
+	local stale = {}
+
+	for key in pairs(navigatorButtons) do
+		if key ~= ALL_NAVIGATOR_KEY and not Methods.PacketGroups[key] then
+			stale[#stale + 1] = key
+		end
+	end
+
+	for _, key in ipairs(stale) do
+		destroyNavigatorButton(key)
+	end
+
+	local all = navigatorButtons[ALL_NAVIGATOR_KEY] or makeNavigatorButton(ALL_NAVIGATOR_KEY)
+	fillNavigatorButton(all, "All", #Methods.Logs, "all IDs", false, 1, selectedPacketKey == nil)
+
+	for index, group in ipairs(Methods.PacketGroupList) do
+		local key = group.Key
+		local model = navigatorButtons[key] or makeNavigatorButton(key)
+		local ignored = Methods.IsPacketIdIgnored(group.PacketId)
+		local title = ("ID %s"):format(safeString(group.PacketId))
+		local detail = ("%sS / %sR"):format(safeString(group.SendCount), safeString(group.ReceiveCount))
+		fillNavigatorButton(model, title, group.Count, detail, ignored, index + 1, selectedPacketKey == key)
+	end
+end
+
+selectPacketGroup = function(key)
+	if key and not Methods.PacketGroups[key] then
+		key = nil
+	end
+
+	if selectedPacketKey == key then
+		return
+	end
+
+	selectedPacketKey = key
+	selectedEntry = nil
+	windowStart = 1
+	hideViewer()
+	rebuildSearchResults()
+	queueRender(true)
 end
 
 local function renderNow()
 	renderQueued = false
 
 	if not alive or not Page.Parent or not Page.Visible then
-		renderDirty = true
 		return
 	end
 
-	renderDirty = false
 	local oldPosition = scroll.CanvasPosition
-	local anchorSequence
-	local anchorDisplayIndex
-	local anchorOffset = 0
-	local rowStride = ROW_HEIGHT + ROW_GAP
-
-	if not followingTop and renderedCount > 0 then
-		anchorDisplayIndex = math.max(1, math.min(renderedCount, math.floor(oldPosition.Y / rowStride) + 1))
-		local anchor = rows[anchorDisplayIndex]
-
-		if anchor and anchor.Entry then
-			anchorSequence = anchor.Entry.Sequence
-			anchorOffset = oldPosition.Y - (anchorDisplayIndex - 1) * rowStride
-		end
-	end
-
-	local query = search.Text:lower():match("^%s*(.-)%s*$") or ""
 	local maximum = settingNumber(
 		{ "MaxRenderedRakNetLogs", "MaxRakNetRenderedLogs", "MaxRenderedLogs" },
 		DEFAULT_RENDER_LIMIT,
@@ -1227,80 +1515,24 @@ local function renderNow()
 		500
 	)
 	local total = #Methods.Logs
-
-	if selectedEntry and not selectionIsRetained(selectedEntry, total) then
-		selectedEntry = nil
-		hideViewer()
-	end
-
-	local matching = 0
+	local source = currentSource()
+	local matching = activeQuery == "" and #source or searchResultCount()
 	local shown = 0
-	local newAnchorIndex
-	local windowStart = 1
+	windowStart = math.max(1, math.min(windowStart, math.max(1, matching)))
 
 	local function showEntry(entry)
 		shown = shown + 1
 		local row = rows[shown] or makeRow(shown)
 		fillRow(row, entry, shown)
-
-		if anchorSequence ~= nil and entry.Sequence == anchorSequence then
-			newAnchorIndex = shown
-		end
 	end
 
-	if query == "" and showSend and showReceive then
-		matching = total
-		local newestLogIndex = total
+	for newestIndex = windowStart, math.min(matching, windowStart + maximum - 1) do
+		local chronologicalIndex = matching - newestIndex + 1
+		local entry = activeQuery == "" and source[chronologicalIndex]
+			or searchResults[searchResultHead + chronologicalIndex - 1]
 
-		if anchorSequence ~= nil and anchorDisplayIndex then
-			local anchorLogIndex
-
-			for logIndex = total, 1, -1 do
-				local entry = Methods.Logs[logIndex]
-
-				if entry and entry.Sequence == anchorSequence then
-					anchorLogIndex = logIndex
-					break
-				end
-			end
-
-			if anchorLogIndex then
-				newestLogIndex = math.min(total, anchorLogIndex + anchorDisplayIndex - 1)
-				windowStart = total - newestLogIndex + 1
-			end
-		end
-
-		for logIndex = newestLogIndex, math.max(1, newestLogIndex - maximum + 1), -1 do
-			local entry = Methods.Logs[logIndex]
-
-			if entry then
-				showEntry(entry)
-			end
-		end
-	else
-		local matches = {}
-		local anchorMatchIndex
-
-		for logIndex = total, 1, -1 do
-			local entry = Methods.Logs[logIndex]
-
-			if entry and matchesFilters(entry, query) then
-				matches[#matches + 1] = entry
-
-				if anchorSequence ~= nil and entry.Sequence == anchorSequence then
-					anchorMatchIndex = #matches
-				end
-			end
-		end
-
-		matching = #matches
-
-		if anchorMatchIndex and anchorDisplayIndex then
-			windowStart = math.max(1, anchorMatchIndex - anchorDisplayIndex + 1)
-		end
-
-		for matchIndex = windowStart, math.min(matching, windowStart + maximum - 1) do
-			showEntry(matches[matchIndex])
+		if entry then
+			showEntry(entry)
 		end
 	end
 
@@ -1309,7 +1541,7 @@ local function renderNow()
 		rows[index].Button.Visible = false
 	end
 
-	renderedCount = shown
+	refreshNavigator()
 	local newerOutside = math.max(0, windowStart - 1)
 	local olderOutside = math.max(0, matching - newerOutside - shown)
 	local suffix = ""
@@ -1324,6 +1556,14 @@ local function renderNow()
 		total,
 		suffix
 	)
+	newerPage.Active = newerOutside > 0
+	newerPage.AutoButtonColor = newerOutside > 0
+	newerPage.BackgroundColor3 = newerOutside > 0 and colours.button or colours.buttonDisabled
+	newerPage.TextTransparency = newerOutside > 0 and 0 or 0.48
+	olderPage.Active = olderOutside > 0
+	olderPage.AutoButtonColor = olderOutside > 0
+	olderPage.BackgroundColor3 = olderOutside > 0 and colours.button or colours.buttonDisabled
+	olderPage.TextTransparency = olderOutside > 0 and 0 or 0.48
 	updateActions()
 
 	local shouldForceTop = forceTopOnRender
@@ -1333,15 +1573,7 @@ local function renderNow()
 			return
 		end
 
-		local targetY
-
-		if shouldForceTop or followingTop then
-			targetY = 0
-		elseif newAnchorIndex then
-			targetY = (newAnchorIndex - 1) * rowStride + anchorOffset
-		else
-			targetY = oldPosition.Y
-		end
+		local targetY = shouldForceTop and 0 or oldPosition.Y
 
 		local maximumY = math.max(0, rowsLayout.AbsoluteContentSize.Y + 8 - scroll.AbsoluteSize.Y)
 		settingCanvasPosition = true
@@ -1350,7 +1582,7 @@ local function renderNow()
 	end)
 end
 
-local function queueRender(forceTop)
+queueRender = function(forceTop)
 	if not alive or not Page.Parent then
 		return
 	end
@@ -1359,8 +1591,6 @@ local function queueRender(forceTop)
 		forceTopOnRender = true
 		followingTop = true
 	end
-
-	renderDirty = true
 
 	if not Page.Visible then
 		return
@@ -1380,12 +1610,7 @@ end))
 
 trackConnection(scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
 	if not settingCanvasPosition then
-		local wasFollowingTop = followingTop
 		followingTop = scroll.CanvasPosition.Y <= TOP_PIN_THRESHOLD
-
-		if followingTop and not wasFollowingTop then
-			queueRender(true)
-		end
 	end
 end))
 
@@ -1396,6 +1621,10 @@ trackConnection(search:GetPropertyChangedSignal("Text"):Connect(function()
 
 	task.delay(0.12, function()
 		if alive and generation == searchGeneration and search.Parent then
+			activeQuery = search.Text:lower():match("^%s*(.-)%s*$") or ""
+			windowStart = 1
+			rebuildSearchResults()
+			revalidateSelectedEntry()
 			queueRender(true)
 		end
 	end)
@@ -1405,6 +1634,9 @@ trackConnection(sendFilter.MouseButton1Click:Connect(function()
 	showSend = not showSend
 	sendFilter.Text = showSend and "Send  ON" or "Send  OFF"
 	sendFilter.TextColor3 = showSend and colours.send or colours.muted
+	windowStart = 1
+	rebuildSearchResults()
+	revalidateSelectedEntry()
 	queueRender(true)
 end))
 
@@ -1412,11 +1644,44 @@ trackConnection(receiveFilter.MouseButton1Click:Connect(function()
 	showReceive = not showReceive
 	receiveFilter.Text = showReceive and "Receive  ON" or "Receive  OFF"
 	receiveFilter.TextColor3 = showReceive and colours.receive or colours.muted
+	windowStart = 1
+	rebuildSearchResults()
+	revalidateSelectedEntry()
 	queueRender(true)
 end))
 
 sendFilter.TextColor3 = colours.send
 receiveFilter.TextColor3 = colours.receive
+
+trackConnection(newerPage.MouseButton1Click:Connect(function()
+	if not newerPage.Active then
+		return
+	end
+
+	local maximum = settingNumber(
+		{ "MaxRenderedRakNetLogs", "MaxRakNetRenderedLogs", "MaxRenderedLogs" },
+		DEFAULT_RENDER_LIMIT,
+		10,
+		500
+	)
+	windowStart = math.max(1, windowStart - maximum)
+	queueRender(true)
+end))
+
+trackConnection(olderPage.MouseButton1Click:Connect(function()
+	if not olderPage.Active then
+		return
+	end
+
+	local maximum = settingNumber(
+		{ "MaxRenderedRakNetLogs", "MaxRakNetRenderedLogs", "MaxRenderedLogs" },
+		DEFAULT_RENDER_LIMIT,
+		10,
+		500
+	)
+	windowStart = windowStart + maximum
+	queueRender(true)
+end))
 
 actionButtons.Pause = makeActionButton(toolbar, "Pause", "Pause", icons.pause, 1, function()
 	local ran, result = pcall(Methods.SetEnabled, not Methods.Enabled)
@@ -1425,7 +1690,7 @@ actionButtons.Pause = makeActionButton(toolbar, "Pause", "Pause", icons.pause, 1
 		showViewer("RakNet Capture Error", safeString(result))
 	end
 
-	updateWarning()
+	updateCaptureControls()
 end)
 
 actionButtons.Clear = makeActionButton(toolbar, "Clear", "Clear", icons.clear, 2, function()
@@ -1437,17 +1702,45 @@ actionButtons.Clear = makeActionButton(toolbar, "Clear", "Clear", icons.clear, 2
 	end
 
 	selectedEntry = nil
+	selectedPacketKey = nil
+	windowStart = 1
+	resetSearchResults()
 	hideViewer()
 	queueRender(true)
 end)
 
-actionButtons.Details = makeActionButton(toolbar, "Details", "Details", icons.details, 3, showDetails)
-actionButtons.Hex = makeActionButton(toolbar, "Hex", "Hex", icons.hex, 4, showHex)
-actionButtons.Code = makeActionButton(toolbar, "Code", "Code", icons.code, 5, showCode)
-actionButtons.CopyCode = makeActionButton(toolbar, "CopyCode", "Copy Code", icons.copy, 6, copyCode)
-actionButtons.Replay = makeActionButton(toolbar, "Replay", "Replay", icons.replay, 7, showReplayConfirmation)
+actionButtons.Ignore = makeActionButton(toolbar, "Ignore", "Ignore ID", icons.ignore, 3, function()
+	local packetId = selectedPacketIdForAction()
+
+	if packetId == nil then
+		return
+	end
+
+	local ignored = Methods.IsPacketIdIgnored(packetId)
+	local ran, result = pcall(Methods.SetPacketIdIgnored, packetId, not ignored)
+
+	if not ran then
+		showViewer("RakNet Ignore Failed", safeString(result))
+	else
+		setStatus((not ignored and "Ignoring" or "Capturing") .. " RakNet packet ID " .. safeString(packetId))
+	end
+end)
+actionButtons.ClearIgnored = makeActionButton(toolbar, "ClearIgnored", "Clear Ignored", icons.unignore, 4, function()
+	local ran, result = pcall(Methods.ClearIgnoredPacketIds)
+
+	if not ran then
+		showViewer("RakNet Ignore Reset Failed", safeString(result))
+	elseif result then
+		setStatus("Cleared ignored RakNet packet IDs")
+	end
+end)
+actionButtons.Details = makeActionButton(toolbar, "Details", "Details", icons.details, 5, showDetails)
+actionButtons.Hex = makeActionButton(toolbar, "Hex", "Hex", icons.hex, 6, showHex)
+actionButtons.Code = makeActionButton(toolbar, "Code", "Code", icons.code, 7, showCode)
+actionButtons.CopyCode = makeActionButton(toolbar, "CopyCode", "Copy Code", icons.copy, 8, copyCode)
+actionButtons.Replay = makeActionButton(toolbar, "Replay", "Replay", icons.replay, 9, showReplayConfirmation)
 actionButtons.Diagnostics =
-	makeActionButton(toolbar, "Diagnostics", "Diagnostics", icons.diagnostics, 8, showDiagnostics)
+	makeActionButton(toolbar, "Diagnostics", "Diagnostics", icons.diagnostics, 10, showDiagnostics)
 
 trackConnection(Page:GetPropertyChangedSignal("Visible"):Connect(function()
 	if Page.Visible then
@@ -1458,32 +1751,68 @@ trackConnection(Page:GetPropertyChangedSignal("Visible"):Connect(function()
 end))
 
 local packetRenderScheduled = false
-local eventConnection = Methods.ConnectEvent(function(_entry, action)
+local eventConnection = Methods.ConnectEvent(function(entry, action)
 	if action == "cleared" then
 		selectedEntry = nil
+		selectedPacketKey = nil
+		windowStart = 1
+		resetSearchResults()
+		clearRenderedRows()
+		clearNavigatorButtons(true)
 		hideViewer()
 		queueRender(true)
+	elseif action == "removed" then
+		if selectedEntry == entry then
+			selectedEntry = nil
+			hideViewer()
+		end
+
+		for _, row in ipairs(rows) do
+			if row.Entry == entry then
+				row.Entry = nil
+				row.Button.Visible = false
+			end
+		end
+
+		if activeQuery ~= "" and entryBelongsToCurrentSource(entry) and matchesQuery(entry, activeQuery) then
+			removeOldestSearchResult(entry)
+		end
+
+		-- Retention removes the oldest entry immediately before indexing the new
+		-- one. Defer group pruning to render so a same-ID replacement does not
+		-- briefly collapse the user's selected packet group back to All.
+		queueRender(false)
 	elseif action == "added" then
-		if not Page.Visible then
-			renderDirty = true
-		elseif not packetRenderScheduled then
+		local belongs = entryBelongsToCurrentSource(entry)
+		local matches = belongs and (activeQuery == "" or matchesQuery(entry, activeQuery))
+
+		if activeQuery ~= "" and matches then
+			appendSearchResult(entry)
+		end
+
+		if matches and (windowStart > 1 or not followingTop) then
+			windowStart = windowStart + 1
+		end
+
+		if Page.Visible and not packetRenderScheduled then
 			packetRenderScheduled = true
-			local delaySeconds = search.Text == "" and 0.05 or 0.15
+			local delaySeconds = activeQuery == "" and 0.05 or 0.15
 			task.delay(delaySeconds, function()
 				packetRenderScheduled = false
 
 				if not alive or not Page.Parent then
 					return
 				elseif not Page.Visible then
-					renderDirty = true
 					return
 				end
 
 				queueRender(false)
 			end)
 		end
+	elseif action == "ignored" or action == "unignored" or action == "ignored-cleared" then
+		queueRender(false)
 	elseif action == "paused" or action == "resumed" or action == "disconnected" then
-		updateWarning()
+		updateCaptureControls()
 		queueRender(false)
 	end
 end)
@@ -1498,7 +1827,8 @@ if not TabSelector.RegisterTab("RakNetSpy", Tab, Page) then
 	return RakNetSpy
 end
 
-updateWarning()
+updateCaptureControls()
+updateActions()
 queueRender(true)
 
 RakNetSpy.Page = Page

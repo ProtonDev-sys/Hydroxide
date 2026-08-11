@@ -1,11 +1,17 @@
 local CoreGui = game:GetService("CoreGui")
 local TextService = game:GetService("TextService")
+local UserInput = game:GetService("UserInputService")
 
 local TextViewer = {}
 local defaultViewer
 local embeddedViewers = setmetatable({}, { __mode = "k" })
 local DEFAULT_DOCK_WIDTH = 0.44
-local EXPANDED_DOCK_WIDTH = 0.72
+local MINIMUM_DOCK_RATIO = 0.3
+local MAXIMUM_DOCK_RATIO = 0.7
+local MINIMUM_DOCK_WIDTH = 240
+local MINIMUM_PAGE_WIDTH = 220
+local ACTION_BUTTON_HEIGHT = 26
+local ACTION_GAP = 6
 
 local function trackInstance(instance)
 	if oh and oh.Instances then
@@ -17,6 +23,12 @@ local function trackConnection(connection)
 	if oh and oh.Events then
 		oh.Events[#oh.Events + 1] = connection
 	end
+
+	return connection
+end
+
+local function clamp(value, minimum, maximum)
+	return math.max(minimum, math.min(maximum, value))
 end
 
 local function getInterface()
@@ -98,6 +110,7 @@ local function makeButton(parent, text, position, zIndex)
 	button.Text = text
 	button.TextColor3 = Color3.fromRGB(240, 240, 240)
 	button.TextSize = 17
+	button.TextTruncate = Enum.TextTruncate.AtEnd
 	button.Size = UDim2.new(0, 68, 0, 26)
 	button.Position = position
 	button.ZIndex = zIndex
@@ -175,8 +188,7 @@ local function makeViewer(parent, sourceDock, pages)
 	stroke.Thickness = 1
 	stroke.Parent = panel
 
-	local title = makeText(panel, "Inspector", UDim2.new(1, -230, 0, 34), UDim2.new(0, 10, 0, 4), panel.ZIndex + 1)
-	local expand = makeButton(panel, "Expand", UDim2.new(1, -218, 0, 8), panel.ZIndex + 1)
+	local title = makeText(panel, "Inspector", UDim2.new(1, -158, 0, 34), UDim2.new(0, 10, 0, 4), panel.ZIndex + 1)
 	local copy = makeButton(panel, "Copy", UDim2.new(1, -146, 0, 8), panel.ZIndex + 1)
 	local hide = makeButton(panel, "Hide", UDim2.new(1, -74, 0, 8), panel.ZIndex + 1)
 
@@ -202,22 +214,34 @@ local function makeViewer(parent, sourceDock, pages)
 	padding.PaddingTop = UDim.new(0, 8)
 	padding.Parent = scroller
 
-	local actionFrame = Instance.new("Frame")
+	local actionFrame = Instance.new("ScrollingFrame")
 	actionFrame.Name = "Actions"
+	actionFrame.Active = true
 	actionFrame.BackgroundTransparency = 1
 	actionFrame.BorderSizePixel = 0
+	actionFrame.BottomImage = ""
+	actionFrame.CanvasPosition = Vector2.new()
+	actionFrame.CanvasSize = UDim2.new()
+	actionFrame.ClipsDescendants = true
+	actionFrame.MidImage = ""
 	actionFrame.Position = UDim2.new(0, 8, 1, -38)
+	actionFrame.ScrollBarImageColor3 = Color3.fromRGB(92, 92, 92)
+	actionFrame.ScrollBarThickness = 0
+	actionFrame.ScrollingDirection = Enum.ScrollingDirection.Y
 	actionFrame.Size = UDim2.new(1, -16, 0, 30)
+	actionFrame.TopImage = ""
 	actionFrame.Visible = false
 	actionFrame.ZIndex = panel.ZIndex + 2
 	actionFrame.Parent = panel
 
-	local actionLayout = Instance.new("UIListLayout")
+	local actionLayout = Instance.new("UIGridLayout")
+	actionLayout.CellPadding = UDim2.new(0, ACTION_GAP, 0, ACTION_GAP)
+	actionLayout.CellSize = UDim2.new(0, 92, 0, ACTION_BUTTON_HEIGHT)
 	actionLayout.FillDirection = Enum.FillDirection.Horizontal
 	actionLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
-	actionLayout.Padding = UDim.new(0, 6)
+	actionLayout.FillDirectionMaxCells = 1
 	actionLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	actionLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	actionLayout.StartCorner = Enum.StartCorner.TopLeft
 	actionLayout.Parent = actionFrame
 
 	local textLabel = Instance.new("TextLabel")
@@ -232,8 +256,36 @@ local function makeViewer(parent, sourceDock, pages)
 	textLabel.ZIndex = scroller.ZIndex + 1
 	textLabel.Parent = scroller
 
+	local splitter
+
+	if sourceDock ~= nil then
+		splitter = Instance.new("TextButton")
+		splitter.Name = "Splitter"
+		splitter.Active = true
+		splitter.AutoButtonColor = false
+		splitter.BackgroundTransparency = 1
+		splitter.BorderSizePixel = 0
+		splitter.Position = UDim2.new(0, 0, 0, 5)
+		splitter.Size = UDim2.new(0, 16, 1, -10)
+		splitter.Text = ""
+		splitter.ZIndex = overlay.ZIndex + 10
+		splitter.Parent = parent
+
+		local splitterLine = Instance.new("Frame")
+		splitterLine.Name = "Line"
+		splitterLine.AnchorPoint = Vector2.new(0, 0.5)
+		splitterLine.BackgroundColor3 = Color3.fromRGB(155, 155, 155)
+		splitterLine.BorderSizePixel = 0
+		splitterLine.Position = UDim2.new(0, 2, 0.5, 0)
+		splitterLine.Size = UDim2.new(0, 2, 0, 34)
+		splitterLine.ZIndex = splitter.ZIndex + 1
+		splitterLine.Parent = splitter
+	end
+
 	local current = {
+		ActionConnections = {},
 		Dock = parent,
+		DockRatio = DEFAULT_DOCK_WIDTH,
 		SourceDock = sourceDock,
 		Pages = pages,
 		OriginalPagesPosition = pages and pages.Position or nil,
@@ -248,13 +300,160 @@ local function makeViewer(parent, sourceDock, pages)
 		CopyText = "",
 		Scroller = scroller,
 		ActionFrame = actionFrame,
+		ActionLayout = actionLayout,
+		ActionWidths = {},
 		Embedded = sourceDock == nil,
-		Expanded = false,
+		NormalDockRatio = DEFAULT_DOCK_WIDTH,
 		OnHide = nil,
+		Panel = panel,
+		SplitDragging = false,
+		SplitPointer = nil,
+		Splitter = splitter,
 	}
+
+	local function disconnectActionConnections()
+		for _, connection in ipairs(current.ActionConnections) do
+			pcall(function()
+				connection:Disconnect()
+			end)
+		end
+
+		current.ActionConnections = {}
+	end
+
+	local function updateHeaderLayout()
+		local panelWidth = math.floor(current.Panel.AbsoluteSize.X)
+
+		if panelWidth <= 0 then
+			return
+		end
+
+		local margin = math.min(8, math.floor(panelWidth * 0.1))
+		local buttonGap = math.min(4, math.max(0, panelWidth - margin * 2 - 2))
+		local buttonWidth = math.max(1, math.min(68, math.floor((panelWidth - margin * 2 - buttonGap) / 2)))
+		local buttonsWidth = buttonWidth * 2 + buttonGap
+
+		copy.Position = UDim2.new(1, -(margin + buttonsWidth), 0, 8)
+		copy.Size = UDim2.new(0, buttonWidth, 0, ACTION_BUTTON_HEIGHT)
+		hide.Position = UDim2.new(1, -(margin + buttonWidth), 0, 8)
+		hide.Size = UDim2.new(0, buttonWidth, 0, ACTION_BUTTON_HEIGHT)
+		title.Size = UDim2.new(0, math.max(0, panelWidth - margin - buttonsWidth - 10), 0, 34)
+		title.Visible = title.Size.X.Offset >= 24
+	end
+
+	local function getDockBounds()
+		local dockParent = current.Dock.Parent
+		local parentWidth = dockParent and dockParent.AbsoluteSize.X or 0
+
+		if parentWidth <= 0 then
+			return MINIMUM_DOCK_RATIO, MAXIMUM_DOCK_RATIO
+		end
+
+		local minimumDockPixels =
+			math.max(parentWidth * MINIMUM_DOCK_RATIO, math.min(MINIMUM_DOCK_WIDTH, parentWidth * 0.5))
+		local minimumPagePixels =
+			math.max(parentWidth * (1 - MAXIMUM_DOCK_RATIO), math.min(MINIMUM_PAGE_WIDTH, parentWidth * 0.45))
+		local maximumDockPixels = math.max(minimumDockPixels, parentWidth - minimumPagePixels)
+		return minimumDockPixels / parentWidth, maximumDockPixels / parentWidth
+	end
+
+	local function applyDockRatio(ratio, remember)
+		if current.Embedded then
+			return ratio
+		end
+
+		local minimumRatio, maximumRatio = getDockBounds()
+		ratio = clamp(tonumber(ratio) or DEFAULT_DOCK_WIDTH, minimumRatio, maximumRatio)
+		current.DockRatio = ratio
+		current.Dock.Size = UDim2.new(ratio, -12, 1, -16)
+
+		if remember then
+			current.NormalDockRatio = ratio
+		end
+
+		if current.Pages and current.RestorePagesSize then
+			current.Pages.Size =
+				UDim2.new(1 - ratio, -4, current.RestorePagesSize.Y.Scale, current.RestorePagesSize.Y.Offset)
+		end
+
+		return ratio
+	end
+
+	local function updateActionLayout()
+		local actionCount = #current.ActionWidths
+
+		if actionCount == 0 then
+			current.ActionFrame.Visible = false
+			current.ActionFrame.CanvasSize = UDim2.new()
+			current.Scroller.Size = UDim2.new(1, -16, 1, -50)
+			return
+		end
+
+		local width = math.floor(current.ActionFrame.AbsoluteSize.X)
+
+		if width <= 0 then
+			return
+		end
+
+		local preferredWidth = 76
+
+		for _, actionWidth in ipairs(current.ActionWidths) do
+			preferredWidth = math.max(preferredWidth, actionWidth)
+		end
+
+		local columns =
+			math.max(1, math.min(actionCount, math.floor((width + ACTION_GAP) / (preferredWidth + ACTION_GAP))))
+		local cellWidth =
+			math.max(1, math.min(preferredWidth, math.floor((width - ACTION_GAP * (columns - 1)) / columns)))
+		local rows = math.ceil(actionCount / columns)
+		local contentHeight = rows * ACTION_BUTTON_HEIGHT + math.max(0, rows - 1) * ACTION_GAP
+		local availablePanelHeight = math.max(ACTION_BUTTON_HEIGHT, current.Panel.AbsoluteSize.Y - 70)
+		local maximumVisibleHeight = math.max(ACTION_BUTTON_HEIGHT, math.floor(availablePanelHeight * 0.35))
+		local visibleHeight = math.min(contentHeight, maximumVisibleHeight)
+
+		current.ActionLayout.FillDirectionMaxCells = columns
+		current.ActionLayout.CellSize = UDim2.new(0, cellWidth, 0, ACTION_BUTTON_HEIGHT)
+		current.ActionFrame.Position = UDim2.new(0, 8, 1, -(visibleHeight + 8))
+		current.ActionFrame.Size = UDim2.new(1, -16, 0, visibleHeight)
+		current.ActionFrame.CanvasSize = UDim2.new(0, width, 0, contentHeight)
+		current.ActionFrame.ScrollBarThickness = contentHeight > visibleHeight and 4 or 0
+		current.ActionFrame.Visible = true
+		current.Scroller.Size = UDim2.new(1, -16, 1, -(50 + visibleHeight + 6))
+
+		local maximumScroll = math.max(0, contentHeight - visibleHeight)
+		if current.ActionFrame.CanvasPosition.Y > maximumScroll then
+			current.ActionFrame.CanvasPosition = Vector2.new(0, maximumScroll)
+		end
+	end
+
+	local function queueActionLayout()
+		if current.ActionLayoutQueued then
+			return
+		end
+
+		current.ActionLayoutQueued = true
+		task.defer(function()
+			current.ActionLayoutQueued = false
+			if current.Overlay.Parent then
+				updateActionLayout()
+			end
+		end)
+	end
+
+	local function cancelSplitDrag()
+		current.SplitDragging = false
+		current.SplitPointer = nil
+	end
+
+	current.ApplyDockRatio = applyDockRatio
+	current.DisconnectActionConnections = disconnectActionConnections
+	current.UpdateActionLayout = updateActionLayout
+	updateHeaderLayout()
 
 	function current.Hide()
 		local wasVisible = current.Overlay.Visible
+		cancelSplitDrag()
+		disconnectActionConnections()
 		current.Overlay.Visible = false
 
 		if not current.Embedded then
@@ -287,26 +486,81 @@ local function makeViewer(parent, sourceDock, pages)
 		current.Hide()
 	end))
 
-	if current.Embedded then
-		expand.Visible = false
-		title.Size = UDim2.new(1, -158, 0, 34)
-	else
-		trackConnection(expand.MouseButton1Click:Connect(function()
-			current.Expanded = not current.Expanded
-			local width = current.Expanded and EXPANDED_DOCK_WIDTH or DEFAULT_DOCK_WIDTH
-			current.Dock.Size = UDim2.new(
-				width,
-				-12,
-				1,
-				-16
-			)
+	trackConnection(current.ActionFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueActionLayout))
+	trackConnection(panel:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		updateHeaderLayout()
+		queueActionLayout()
+	end))
 
-			if current.Pages and current.RestorePagesSize then
-				current.Pages.Size =
-					UDim2.new(1 - width, -4, current.RestorePagesSize.Y.Scale, current.RestorePagesSize.Y.Offset)
+	if current.Splitter then
+		trackConnection(current.Splitter.InputBegan:Connect(function(input)
+			local inputType = input.UserInputType
+
+			if
+				current.SplitDragging
+				or not current.Overlay.Visible
+				or (inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch)
+			then
+				return
 			end
 
-			expand.Text = current.Expanded and "Restore" or "Expand"
+			current.SplitDragging = true
+			current.SplitPointer = input
+		end))
+
+		trackConnection(UserInput.InputChanged:Connect(function(input)
+			if not current.SplitDragging then
+				return
+			end
+
+			local pointer = current.SplitPointer
+			local matchesPointer = pointer
+				and (
+					(pointer.UserInputType == Enum.UserInputType.Touch and input == pointer)
+					or (
+						pointer.UserInputType == Enum.UserInputType.MouseButton1
+						and input.UserInputType == Enum.UserInputType.MouseMovement
+					)
+				)
+
+			if not matchesPointer then
+				return
+			end
+
+			local dockParent = current.Dock.Parent
+			local parentWidth = dockParent and dockParent.AbsoluteSize.X or 0
+
+			if parentWidth > 0 then
+				local localPointerX = input.Position.X - dockParent.AbsolutePosition.X
+				local ratio = 1 - localPointerX / parentWidth
+				applyDockRatio(ratio, true)
+			end
+		end))
+
+		trackConnection(UserInput.InputEnded:Connect(function(input)
+			local pointer = current.SplitPointer
+
+			if
+				pointer
+				and (
+					(pointer.UserInputType == Enum.UserInputType.Touch and input == pointer)
+					or (
+						pointer.UserInputType == Enum.UserInputType.MouseButton1
+						and input.UserInputType == Enum.UserInputType.MouseButton1
+					)
+				)
+			then
+				cancelSplitDrag()
+			end
+		end))
+
+		trackConnection(UserInput.WindowFocusReleased:Connect(cancelSplitDrag))
+		trackConnection(current.Dock.Parent:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			cancelSplitDrag()
+
+			if current.Overlay.Visible then
+				applyDockRatio(current.DockRatio, true)
+			end
 		end))
 	end
 
@@ -361,6 +615,9 @@ function TextViewer.Show(title, text, options)
 		end
 	end
 
+	current.DisconnectActionConnections()
+	current.ActionWidths = {}
+
 	for _, child in ipairs(current.ActionFrame:GetChildren()) do
 		if child:IsA("GuiButton") then
 			child:Destroy()
@@ -368,19 +625,30 @@ function TextViewer.Show(title, text, options)
 	end
 
 	local actions = type(options.Actions) == "table" and options.Actions or {}
-	current.ActionFrame.Visible = #actions > 0
-	current.Scroller.Size = UDim2.new(1, -16, 1, #actions > 0 and -86 or -50)
+	current.ActionFrame.CanvasPosition = Vector2.new()
 
-	for index, action in ipairs(actions) do
+	for _, action in ipairs(actions) do
 		if type(action) == "table" and type(action.Callback) == "function" then
-			local actionButton = makeButton(current.ActionFrame, tostring(action.Label or action.Name or "Action"), UDim2.new(), current.ActionFrame.ZIndex + 1)
-			actionButton.LayoutOrder = index
-			actionButton.Size = UDim2.new(0, math.max(76, tonumber(action.Width) or 92), 0, 26)
-			actionButton.MouseButton1Click:Connect(function()
-				action.Callback(current)
-			end)
+			local actionIndex = #current.ActionWidths + 1
+			local actionWidth = math.max(76, tonumber(action.Width) or 92)
+			local actionButton = makeButton(
+				current.ActionFrame,
+				tostring(action.Label or action.Name or "Action"),
+				UDim2.new(),
+				current.ActionFrame.ZIndex + 1
+			)
+			actionButton.LayoutOrder = actionIndex
+			actionButton.Size = UDim2.new(0, actionWidth, 0, ACTION_BUTTON_HEIGHT)
+			current.ActionWidths[actionIndex] = actionWidth
+			current.ActionConnections[#current.ActionConnections + 1] = actionButton.MouseButton1Click:Connect(
+				function()
+					action.Callback(current)
+				end
+			)
 		end
 	end
+
+	current.UpdateActionLayout()
 
 	current.Title.Text = tostring(title or "Inspector")
 	current.TextBox.Text = text
@@ -397,12 +665,7 @@ function TextViewer.Show(title, text, options)
 		end
 
 		current.Dock.Visible = true
-
-		if current.Pages and current.RestorePagesSize then
-			local width = current.Expanded and EXPANDED_DOCK_WIDTH or DEFAULT_DOCK_WIDTH
-			current.Pages.Size =
-				UDim2.new(1 - width, -4, current.RestorePagesSize.Y.Scale, current.RestorePagesSize.Y.Offset)
-		end
+		current.ApplyDockRatio(current.NormalDockRatio, true)
 	end
 
 	current.Overlay.Visible = true

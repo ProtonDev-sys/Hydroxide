@@ -53,9 +53,14 @@ local runtimeSettings = {
     MaxScriptRows = numberSetting("maxScriptRows", 750, 50, 2000),
     MaxModuleRows = numberSetting("maxModuleRows", 750, 50, 2000),
     MaxModuleFunctions = numberSetting("maxModuleFunctions", 32, 1, 128),
-    MaxRakNetLogs = numberSetting("maxRakNetLogs", 500, 25, 5000),
+    -- Zero keeps RakNet snapshots until the user clears them. Positive values
+    -- opt into count-based eviction for unusually long capture sessions.
+    MaxRakNetLogs = numberSetting("maxRakNetLogs", 0, 0, 5000),
+    MaxRenderedRakNetLogs = numberSetting("maxRenderedRakNetLogs", 100, 10, 500),
     MaxRakNetPacketBytes = numberSetting("maxRakNetPacketBytes", 65536, 256, 16777216),
-    MaxRakNetHistoryBytes = numberSetting("maxRakNetHistoryBytes", 4194304, 65536, 67108864),
+    -- Zero disables aggregate-history eviction; each individual packet remains
+    -- bounded by MaxRakNetPacketBytes and the UI renders a small moving window.
+    MaxRakNetHistoryBytes = numberSetting("maxRakNetHistoryBytes", 0, 0, 67108864),
     MaxRakNetGeneratedOutputBytes = numberSetting("maxRakNetGeneratedOutputBytes", 1048576, 1024, 8388608)
 }
 

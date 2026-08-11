@@ -5,9 +5,7 @@ local packValues = table.pack or function(...)
 end
 local unpackValues = table.unpack or unpack
 
-local DEFAULT_MAX_LOGS = 500
 local DEFAULT_MAX_PACKET_BYTES = 65536
-local DEFAULT_MAX_HISTORY_BYTES = 4194304
 local DEFAULT_MAX_GENERATED_OUTPUT_BYTES = 1048576
 
 local settings = type(oh) == "table" and type(oh.Settings) == "table" and oh.Settings or {}
@@ -26,17 +24,40 @@ local function settingNumber(names, defaultValue, minimum, maximum)
 	return math.max(minimum, math.min(maximum, value))
 end
 
-local maxLogs = settingNumber({ "MaxRakNetLogs", "maxRakNetLogs" }, DEFAULT_MAX_LOGS, 1, 5000)
+local function optionalPositiveSetting(names, maximum)
+	for _, name in ipairs(names) do
+		if settings[name] ~= nil then
+			local value = tonumber(settings[name])
+
+			if not value or value ~= value or value == math.huge or value == -math.huge then
+				return nil
+			end
+
+			value = math.floor(value)
+
+			if value < 1 then
+				return nil
+			end
+
+			return math.min(maximum, value)
+		end
+	end
+
+	return nil
+end
+
+-- History is clear-only by default. Count/byte retention limits are intentionally
+-- opt-in so captures never disappear merely because the page has been open for a
+-- while. The UI bounds its own rendered window independently of these values.
+local maxLogs = optionalPositiveSetting({ "MaxRakNetLogs", "maxRakNetLogs" }, 5000)
 local maxPacketBytes = settingNumber(
 	{ "MaxRakNetPacketBytes", "MaxRakNetPayloadBytes", "maxRakNetPacketBytes", "maxRakNetPayloadBytes" },
 	DEFAULT_MAX_PACKET_BYTES,
 	1,
 	16777216
 )
-local maxHistoryBytes = settingNumber(
+local maxHistoryBytes = optionalPositiveSetting(
 	{ "MaxRakNetHistoryBytes", "MaxRakNetTotalBytes", "maxRakNetHistoryBytes", "maxRakNetTotalBytes" },
-	DEFAULT_MAX_HISTORY_BYTES,
-	1,
 	67108864
 )
 local maxGeneratedOutputBytes = settingNumber({
@@ -52,12 +73,14 @@ local diagnostics = {
 	SendPacketsCaptured = 0,
 	ReceivePacketsCaptured = 0,
 	PacketsSkippedPaused = 0,
+	PacketsSkippedIgnored = 0,
 	CaptureErrors = 0,
 	PayloadFailures = 0,
 	PayloadTruncations = 0,
 	LogsDropped = 0,
 	BytesDropped = 0,
 	HistoryBytes = 0,
+	HistoryCompactions = 0,
 	EventErrors = 0,
 	ReplayAttempts = 0,
 	ReplaySuccesses = 0,
@@ -85,7 +108,19 @@ local function createHistory(capacity, byteCapacity)
 	local proxy = {}
 
 	local function physicalIndex(logicalIndex)
-		return ((head + logicalIndex - 2) % capacity) + 1
+		return head + logicalIndex - 1
+	end
+
+	local function compact()
+		local replacement = {}
+
+		for logicalIndex = 1, count do
+			replacement[logicalIndex] = storage[physicalIndex(logicalIndex)]
+		end
+
+		storage = replacement
+		head = 1
+		diagnostics.HistoryCompactions = diagnostics.HistoryCompactions + 1
 	end
 
 	local function popOldest()
@@ -95,12 +130,18 @@ local function createHistory(capacity, byteCapacity)
 
 		local entry = storage[head]
 		storage[head] = nil
-		head = (head % capacity) + 1
+		head = head + 1
 		count = count - 1
 		storedBytes = math.max(0, storedBytes - (entry.StoredBytes or 0))
 
 		if count == 0 then
+			storage = {}
 			head = 1
+		elseif head > 1024 and head - 1 > count then
+			-- Long-running capped histories otherwise accumulate ever-larger numeric
+			-- indices even though their evicted slots are nil. Repack only when the
+			-- tombstones outnumber live entries so ordinary pushes stay O(1).
+			compact()
 		end
 
 		return entry
@@ -110,7 +151,10 @@ local function createHistory(capacity, byteCapacity)
 		local dropped = {}
 		local entryBytes = math.max(0, math.floor(tonumber(entry.StoredBytes) or 0))
 
-		while count > 0 and (count >= capacity or storedBytes + entryBytes > byteCapacity) do
+		while
+			count > 0
+			and ((capacity and count >= capacity) or (byteCapacity and storedBytes + entryBytes > byteCapacity))
+		do
 			dropped[#dropped + 1] = popOldest()
 		end
 
@@ -125,6 +169,10 @@ local function createHistory(capacity, byteCapacity)
 		head = 1
 		count = 0
 		storedBytes = 0
+	end
+
+	function methods.PopOldest()
+		return popOldest()
 	end
 
 	function methods.Bytes()
@@ -160,8 +208,108 @@ local function createHistory(capacity, byteCapacity)
 end
 
 local logs = createHistory(maxLogs, maxHistoryBytes)
+local sendLogs = createHistory()
+local receiveLogs = createHistory()
+local packetGroups = {}
+local packetGroupList = {}
+local ignoredPacketIds = {}
 local listeners = {}
 local sequence = 0
+
+local function packetIdKey(packetId)
+	local valueType = type(packetId)
+
+	if valueType == "number" then
+		if packetId ~= packetId then
+			return "number:nan"
+		elseif packetId == math.huge then
+			return "number:inf"
+		elseif packetId == -math.huge then
+			return "number:-inf"
+		end
+	end
+
+	return valueType .. ":" .. safeError(packetId)
+end
+
+local function clearArray(array)
+	for index = #array, 1, -1 do
+		array[index] = nil
+	end
+end
+
+local function getOrCreatePacketGroup(entry)
+	local key = packetIdKey(entry.PacketId)
+	local group = packetGroups[key]
+
+	if not group then
+		group = {
+			Key = key,
+			PacketId = entry.PacketId,
+			Count = 0,
+			SendCount = 0,
+			ReceiveCount = 0,
+			Logs = createHistory(),
+			SendLogs = createHistory(),
+			ReceiveLogs = createHistory(),
+		}
+		packetGroups[key] = group
+		packetGroupList[#packetGroupList + 1] = group
+	end
+
+	return group
+end
+
+local function indexEntry(entry)
+	local directionLogs = entry.Direction == "send" and sendLogs or receiveLogs
+	local group = getOrCreatePacketGroup(entry)
+	local groupDirectionLogs = entry.Direction == "send" and group.SendLogs or group.ReceiveLogs
+
+	directionLogs:Push(entry)
+	group.Logs:Push(entry)
+	groupDirectionLogs:Push(entry)
+	group.Count = group.Count + 1
+
+	if entry.Direction == "send" then
+		group.SendCount = group.SendCount + 1
+	else
+		group.ReceiveCount = group.ReceiveCount + 1
+	end
+end
+
+local function unindexEntry(entry)
+	local directionLogs = entry.Direction == "send" and sendLogs or receiveLogs
+	local key = packetIdKey(entry.PacketId)
+	local group = packetGroups[key]
+
+	directionLogs:PopOldest()
+
+	if not group then
+		return
+	end
+
+	local groupDirectionLogs = entry.Direction == "send" and group.SendLogs or group.ReceiveLogs
+	group.Logs:PopOldest()
+	groupDirectionLogs:PopOldest()
+	group.Count = math.max(0, group.Count - 1)
+
+	if entry.Direction == "send" then
+		group.SendCount = math.max(0, group.SendCount - 1)
+	else
+		group.ReceiveCount = math.max(0, group.ReceiveCount - 1)
+	end
+
+	if group.Count == 0 then
+		packetGroups[key] = nil
+
+		for index, candidate in ipairs(packetGroupList) do
+			if candidate == group then
+				table.remove(packetGroupList, index)
+				break
+			end
+		end
+	end
+end
 
 local function emit(entry, action)
 	for connection, callback in pairs(listeners) do
@@ -360,7 +508,7 @@ end
 
 local METADATA_FIELDS = { "PacketId", "Size", "Priority", "Reliability", "OrderingChannel" }
 
-local function snapshotPacket(packet, direction)
+local function snapshotPacket(packet, direction, packetIdRead, packetId)
 	sequence = sequence + 1
 
 	local entry = {
@@ -374,7 +522,13 @@ local function snapshotPacket(packet, direction)
 		StoredBytes = 0,
 	}
 	for _, name in ipairs(METADATA_FIELDS) do
-		local ok, value = readField(packet, name)
+		local ok, value
+
+		if name == "PacketId" then
+			ok, value = packetIdRead, packetId
+		else
+			ok, value = readField(packet, name)
+		end
 
 		if ok then
 			entry[name] = value
@@ -383,7 +537,7 @@ local function snapshotPacket(packet, direction)
 		end
 	end
 
-	local payloadLimit = math.min(maxPacketBytes, maxHistoryBytes)
+	local payloadLimit = maxHistoryBytes and math.min(maxPacketBytes, maxHistoryBytes) or maxPacketBytes
 	local previewLimit = math.min(payloadLimit, math.max(16, math.floor(tonumber(settings.MaxHexBytes) or 512)))
 	local declaredSize = tonumber(entry.Size)
 	local bufferRead, rawBuffer = readField(packet, "AsBuffer")
@@ -488,9 +642,13 @@ local function retainEntry(entry)
 	local dropped = logs:Push(entry)
 
 	for _, oldEntry in ipairs(dropped) do
+		unindexEntry(oldEntry)
 		diagnostics.LogsDropped = diagnostics.LogsDropped + 1
 		diagnostics.BytesDropped = diagnostics.BytesDropped + (oldEntry.StoredBytes or 0)
+		emit(oldEntry, "removed")
 	end
+
+	indexEntry(entry)
 
 	diagnostics.HistoryBytes = logs:Bytes()
 	diagnostics.PacketsCaptured = diagnostics.PacketsCaptured + 1
@@ -512,7 +670,14 @@ local function capture(packet, direction)
 		return
 	end
 
-	local ran, entry = pcall(snapshotPacket, packet, direction)
+	local packetIdRead, packetId = readField(packet, "PacketId")
+
+	if packetIdRead and ignoredPacketIds[packetIdKey(packetId)] then
+		diagnostics.PacketsSkippedIgnored = diagnostics.PacketsSkippedIgnored + 1
+		return
+	end
+
+	local ran, entry = pcall(snapshotPacket, packet, direction, packetIdRead, packetId)
 
 	if not ran then
 		diagnostics.CaptureErrors = diagnostics.CaptureErrors + 1
@@ -768,6 +933,19 @@ RakNetSpy.IsSupported = capabilities.SendHook or capabilities.ReceiveHook
 RakNetSpy.Capabilities = capabilities
 RakNetSpy.Diagnostics = diagnostics
 RakNetSpy.Logs = logs
+RakNetSpy.SendLogs = sendLogs
+RakNetSpy.ReceiveLogs = receiveLogs
+RakNetSpy.PacketGroups = packetGroups
+RakNetSpy.PacketGroupList = packetGroupList
+RakNetSpy.IgnoredPacketIds = ignoredPacketIds
+RakNetSpy.Retention = {
+	MaxLogs = maxLogs,
+	MaxHistoryBytes = maxHistoryBytes,
+	MaxPacketBytes = maxPacketBytes,
+}
+RakNetSpy.PacketIdKey = function(first, second)
+	return packetIdKey(first == RakNetSpy and second or first)
+end
 RakNetSpy.ConnectEvent = function(first, second)
 	return connectEvent(first == RakNetSpy and second or first)
 end
@@ -792,8 +970,67 @@ end
 RakNetSpy.Resume = function()
 	return RakNetSpy.SetEnabled(true)
 end
+RakNetSpy.IsPacketIdIgnored = function(first, second)
+	local packetId = first == RakNetSpy and second or first
+	return ignoredPacketIds[packetIdKey(packetId)] ~= nil
+end
+RakNetSpy.SetPacketIdIgnored = function(first, second, third)
+	local packetId = first == RakNetSpy and second or first
+	local ignored = first == RakNetSpy and third or second
+	local key = packetIdKey(packetId)
+	local existing = ignoredPacketIds[key]
+
+	if ignored == false then
+		if not existing then
+			return false
+		end
+
+		ignoredPacketIds[key] = nil
+		emit(existing, "unignored")
+		return false
+	elseif existing then
+		return true
+	end
+
+	local record = {
+		Key = key,
+		PacketId = packetId,
+	}
+	ignoredPacketIds[key] = record
+	emit(record, "ignored")
+	return true
+end
+RakNetSpy.IgnorePacketId = function(first, second)
+	local packetId = first == RakNetSpy and second or first
+	return RakNetSpy.SetPacketIdIgnored(packetId, true)
+end
+RakNetSpy.UnignorePacketId = function(first, second)
+	local packetId = first == RakNetSpy and second or first
+	return RakNetSpy.SetPacketIdIgnored(packetId, false)
+end
+RakNetSpy.ClearIgnoredPacketIds = function()
+	local changed = next(ignoredPacketIds) ~= nil
+
+	for key in pairs(ignoredPacketIds) do
+		ignoredPacketIds[key] = nil
+	end
+
+	if changed then
+		emit(nil, "ignored-cleared")
+	end
+
+	return changed
+end
 RakNetSpy.Clear = function()
 	logs:Clear()
+	sendLogs:Clear()
+	receiveLogs:Clear()
+
+	for key in pairs(packetGroups) do
+		packetGroups[key] = nil
+	end
+
+	clearArray(packetGroupList)
 	diagnostics.HistoryBytes = 0
 	emit(nil, "cleared")
 end

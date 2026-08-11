@@ -1,3 +1,6 @@
+local TextService = game:GetService("TextService")
+local TweenService = game:GetService("TweenService")
+
 local ModuleScanner = {}
 local Methods = import("modules/ModuleScanner")
 
@@ -11,7 +14,9 @@ local TextViewer = import("ui/controls/TextViewer")
 local FunctionInspector = import("ui/controls/FunctionInspector")
 local ModuleScriptModel = import("objects/ModuleScript")
 
-local Page = import("rbxassetid://11389137937").Base.Body.Pages.ModuleScanner
+local Interface = import("rbxassetid://11389137937")
+local Pages = Interface.Base.Body.Pages
+local Page = Pages.ModuleScanner
 local Assets = import("rbxassetid://5042114982").ModuleScanner
 
 local Query = Page.Query
@@ -84,108 +89,158 @@ local pathContext = ContextMenuButton.new("rbxassetid://4891705738", "Copy Modul
 local sourceContext = ContextMenuButton.new("rbxassetid://4800244808", "Inspect Module")
 moduleList:BindContextMenu(ContextMenu.new({ pathContext, sourceContext }))
 
-local function makeButton(parent, name, text, position, size)
-	local button = Instance.new("TextButton")
-	button.Name = name
-	button.AutoButtonColor = true
-	button.BackgroundColor3 = Color3.fromRGB(39, 39, 39)
-	button.BorderSizePixel = 0
-	button.Font = Enum.Font.SourceSans
-	button.Position = position
-	button.Size = size
-	button.Text = text
-	button.TextColor3 = Color3.fromRGB(235, 235, 235)
-	button.TextSize = 17
-	button.Parent = parent
+local sectionOrder = { "Source", "Environment", "Functions", "Protos", "Constants" }
+local inspectorIcon = "rbxassetid://4800244808"
+local functionIcon = "rbxassetid://4666593447"
+local fadeLength = TweenInfo.new(0.15)
+local textBounds = Vector2.new(133742069, 20)
 
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 4)
-	corner.Parent = button
-	return button
-end
-
-local Details = Instance.new("Frame")
+-- Reuse the Script Scanner's detail shell so both scanners inherit the same
+-- responsive split layout, icon rail, back button, spacing, and section sizes.
+local Details = Pages.ScriptScanner.Info:Clone()
 Details.Name = "HydroxideModuleInspector"
-Details.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
-Details.BorderSizePixel = 0
-Details.Size = UDim2.new(1, 0, 1, 0)
 Details.Visible = false
-Details.ZIndex = 40
 Details.Parent = Page
 
-local Back = makeButton(Details, "Back", "‹  Modules", UDim2.new(0, 8, 0, 8), UDim2.new(0, 110, 0, 28))
-Back.ZIndex = Details.ZIndex + 1
+local Back = Details.Back
+local InfoModule = Details.ScriptObject
+local Title = InfoModule.Label
+local InfoOptions = Details.Options.Clip.Content
+local InfoSections = Details.Sections
 
-local Title = Instance.new("TextLabel")
-Title.BackgroundTransparency = 1
-Title.Font = Enum.Font.SourceSansSemibold
-Title.Position = UDim2.new(0, 128, 0, 8)
-Title.Size = UDim2.new(1, -136, 0, 28)
-Title.Text = "Module Inspector"
-Title.TextColor3 = Color3.fromRGB(240, 240, 240)
-Title.TextSize = 19
-Title.TextTruncate = Enum.TextTruncate.AtEnd
-Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.ZIndex = Details.ZIndex + 1
-Title.Parent = Details
+local function firstTextBox(parent)
+	if parent:IsA("TextBox") then
+		return parent
+	end
 
-local SectionBar = Instance.new("Frame")
-SectionBar.BackgroundTransparency = 1
-SectionBar.Position = UDim2.new(0, 8, 0, 42)
-SectionBar.Size = UDim2.new(1, -16, 0, 30)
-SectionBar.ZIndex = Details.ZIndex + 1
-SectionBar.Parent = Details
+	local search = parent:FindFirstChild("Search", true)
 
-local DetailFilter = Instance.new("TextBox")
-DetailFilter.Name = "SectionFilter"
-DetailFilter.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
-DetailFilter.BorderSizePixel = 0
-DetailFilter.ClearTextOnFocus = false
-DetailFilter.Font = Enum.Font.SourceSans
-DetailFilter.PlaceholderColor3 = Color3.fromRGB(135, 135, 135)
-DetailFilter.PlaceholderText = "Filter current section by key, type, value, or function name; press Enter"
-DetailFilter.Position = UDim2.new(0, 8, 0, 76)
-DetailFilter.Size = UDim2.new(1, -16, 0, 28)
-DetailFilter.Text = ""
-DetailFilter.TextColor3 = Color3.fromRGB(235, 235, 235)
-DetailFilter.TextSize = 16
-DetailFilter.TextXAlignment = Enum.TextXAlignment.Left
-DetailFilter.Visible = false
-DetailFilter.ZIndex = Details.ZIndex + 1
-DetailFilter.Parent = Details
+	if search and search:IsA("TextBox") then
+		return search
+	end
 
-local FilterCorner = Instance.new("UICorner")
-FilterCorner.CornerRadius = UDim.new(0, 4)
-FilterCorner.Parent = DetailFilter
+	for _, descendant in ipairs(parent:GetDescendants()) do
+		if descendant:IsA("TextBox") then
+			return descendant
+		end
+	end
+end
 
-local FilterPadding = Instance.new("UIPadding")
-FilterPadding.PaddingLeft = UDim.new(0, 8)
-FilterPadding.PaddingRight = UDim.new(0, 8)
-FilterPadding.Parent = DetailFilter
+local function setButtonLabel(button, text)
+	local label = button:FindFirstChild("Label")
 
-local SectionLayout = Instance.new("UIGridLayout")
-SectionLayout.CellPadding = UDim2.new(0, 5, 0, 0)
-SectionLayout.CellSize = UDim2.new(0.2, -4, 1, 0)
-SectionLayout.FillDirectionMaxCells = 5
-SectionLayout.SortOrder = Enum.SortOrder.LayoutOrder
-SectionLayout.Parent = SectionBar
+	if label and label:IsA("TextLabel") then
+		label.Text = text
+	else
+		button.Text = text
+	end
+end
 
-local Content = Instance.new("Frame")
-Content.Name = "Content"
-Content.BackgroundTransparency = 1
-Content.Position = UDim2.new(0, 4, 0, 108)
-Content.Size = UDim2.new(1, -8, 1, -112)
-Content.ZIndex = Details.ZIndex + 1
-Content.Parent = Details
+local function clearContainer(container)
+	for _, child in ipairs(container:GetChildren()) do
+		child:Destroy()
+	end
+end
+
+local protoButton = InfoOptions.Protos
+local functionsButton = protoButton:Clone()
+functionsButton.Name = "Functions"
+functionsButton.Parent = InfoOptions
+setButtonLabel(functionsButton, "Functions")
+
+local functionButtonIcon = functionsButton:FindFirstChild("Icon")
+
+if functionButtonIcon and functionButtonIcon:IsA("ImageLabel") then
+	functionButtonIcon.Image = functionIcon
+	local border = functionButtonIcon:FindFirstChild("Border")
+
+	if border and border:IsA("ImageLabel") then
+		border.Image = functionIcon
+	end
+end
+
+-- The shipped Script Scanner rail contains four explicitly sized entries.
+-- Give the cloned module rail its own vertical layout so the fifth Functions
+-- entry remains visible instead of extending beyond the clipped container.
+local oldOptionLayout = InfoOptions:FindFirstChildWhichIsA("UIGridStyleLayout")
+
+if oldOptionLayout then
+	oldOptionLayout:Destroy()
+end
+
+InfoOptions.Size = UDim2.new(1, 0, 1, 0)
+
+local optionLayout = Instance.new("UIListLayout")
+optionLayout.FillDirection = Enum.FillDirection.Vertical
+optionLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+optionLayout.Padding = UDim.new(0, 2)
+optionLayout.SortOrder = Enum.SortOrder.LayoutOrder
+optionLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+optionLayout.Parent = InfoOptions
+
+local functionsSection = InfoSections.Protos:Clone()
+functionsSection.Name = "Functions"
+functionsSection.Parent = InfoSections
 
 local sectionButtons = {}
+local sectionFrames = {}
+local sectionHosts = {}
+local sectionFilters = {}
+local animationCache = {}
+local selectedSectionButton
 
-for index, name in ipairs({ "Source", "Environment", "Functions", "Protos", "Constants" }) do
-	local button = makeButton(SectionBar, name, name, UDim2.new(), UDim2.new())
+for index, name in ipairs(sectionOrder) do
+	local button = InfoOptions:FindFirstChild(name)
+	local section = InfoSections:FindFirstChild(name)
+
 	button.LayoutOrder = index
-	button.ZIndex = SectionBar.ZIndex + 1
+	button.Size = UDim2.new(1, 0, 0, 24)
+	section.LayoutOrder = index
+	section.Visible = false
+	button.Position = UDim2.new()
+
+	local label = button:FindFirstChild("Label")
+
+	if label and label:IsA("TextLabel") then
+		animationCache[button] = {
+			enter = TweenService:Create(label, fadeLength, { TextTransparency = 0 }),
+			leave = TweenService:Create(label, fadeLength, { TextTransparency = 0.2 }),
+		}
+	end
+
 	sectionButtons[name] = button
+	sectionFrames[name] = section
+
+	if name == "Source" then
+		clearContainer(section)
+		sectionHosts[name] = section
+	else
+		local query = section:FindFirstChild("Query")
+		local results = section:FindFirstChild("Results")
+		local filter = query and firstTextBox(query)
+
+		if filter then
+			filter.ClearTextOnFocus = false
+			filter.PlaceholderText = "Filter by key, type, value, or function name; press Enter"
+			filter.Text = ""
+			sectionFilters[name] = filter
+		end
+
+		if not results then
+			results = Instance.new("Frame")
+			results.Name = "Results"
+			results.BackgroundTransparency = 1
+			results.Position = UDim2.new(0, 0, 0, query and 35 or 0)
+			results.Size = UDim2.new(1, 0, 1, query and -35 or 0)
+			results.Parent = section
+		end
+
+		clearContainer(results)
+		sectionHosts[name] = results
+	end
 end
+
+InfoModule.Icon.Image = inspectorIcon
 
 local function runPrivileged(callback)
 	if type(withExecutorIdentity) == "function" then
@@ -402,9 +457,14 @@ local function describeValues(title, values, errorMessage, stillAlive, query)
 	end
 
 	query = tostring(query or ""):lower()
-	local entries, scanned, matched, scanLimited = collectSortedEntries(values, limits.previewEntries, function(value, key)
-		return valueMatchesQuery(value, key, query)
-	end, stillAlive)
+	local entries, scanned, matched, scanLimited = collectSortedEntries(
+		values,
+		limits.previewEntries,
+		function(value, key)
+			return valueMatchesQuery(value, key, query)
+		end,
+		stillAlive
+	)
 	local countText = scanLimited and (tostring(matched) .. "+ (scan bounded)") or tostring(matched)
 	local shownSuffix = matched > #entries and (" (first " .. #entries .. " shown)") or ""
 	appendBounded(output, ("Matches: %s%s | Entries scanned: %d"):format(countText, shownSuffix, scanned))
@@ -457,11 +517,7 @@ local function loadResource(log, name, requestIsCurrent)
 	if state.Loaded then
 		return state.Value, state.Error
 	elseif state.Loading then
-		while
-			state.Loading
-			and isLogAlive(log)
-			and (not requestIsCurrent or requestIsCurrent())
-		do
+		while state.Loading and isLogAlive(log) and (not requestIsCurrent or requestIsCurrent()) do
 			task.wait()
 		end
 
@@ -476,11 +532,7 @@ local function loadResource(log, name, requestIsCurrent)
 		return nil, "Inspection was cancelled"
 	end
 
-	while
-		log.ResourceBusy
-		and isLogAlive(log)
-		and (not requestIsCurrent or requestIsCurrent())
-	do
+	while log.ResourceBusy and isLogAlive(log) and (not requestIsCurrent or requestIsCurrent()) do
 		task.wait()
 	end
 
@@ -491,11 +543,7 @@ local function loadResource(log, name, requestIsCurrent)
 	elseif state.Loaded then
 		return state.Value, state.Error
 	elseif state.Loading then
-		while
-			state.Loading
-			and isLogAlive(log)
-			and (not requestIsCurrent or requestIsCurrent())
-		do
+		while state.Loading and isLogAlive(log) and (not requestIsCurrent or requestIsCurrent()) do
 			task.wait()
 		end
 
@@ -586,8 +634,7 @@ local function describeFunctions(log, values, errorMessage, title, stillAlive, q
 					MaxOutputBytes = math.min(limits.perFunctionBytes, remaining),
 					MaxSourceBytes = math.min(limits.perFunctionSourceBytes, remaining),
 					Decompile = function(target)
-						local source, sourceError =
-							log.ModuleScript:Decompile(target, limits.perFunctionSourceBytes)
+						local source, sourceError = log.ModuleScript:Decompile(target, limits.perFunctionSourceBytes)
 						return truncateSource(source, limits.perFunctionSourceBytes), sourceError
 					end,
 				})
@@ -614,14 +661,28 @@ local function describeFunctions(log, values, errorMessage, title, stillAlive, q
 end
 
 local function setSelectedSection(name)
-	for sectionName, button in pairs(sectionButtons) do
-		button.BackgroundColor3 = sectionName == name and Color3.fromRGB(62, 62, 62) or Color3.fromRGB(39, 39, 39)
+	local section = sectionFrames[name]
+	local button = sectionButtons[name]
+
+	if not (section and button) then
+		return
 	end
 
-	local filtered = name ~= "Source"
-	DetailFilter.Visible = filtered
-	Content.Position = UDim2.new(0, 4, 0, filtered and 108 or 76)
-	Content.Size = UDim2.new(1, -8, 1, filtered and -112 or -80)
+	if selectedSectionButton ~= button then
+		if animationCache[selectedSectionButton] then
+			animationCache[selectedSectionButton].leave:Play()
+		end
+
+		selectedSectionButton = button
+
+		if animationCache[selectedSectionButton] then
+			animationCache[selectedSectionButton].enter:Play()
+		end
+	end
+
+	for sectionName, candidate in pairs(sectionFrames) do
+		candidate.Visible = sectionName == name
+	end
 end
 
 local function inspectionIsCurrent(log, sectionState)
@@ -637,7 +698,7 @@ local function showSectionText(name, text)
 	local generation = detailGeneration
 	detailViewer = TextViewer.Show(name, text, {
 		MaxBytes = limits.inspectorBytes,
-		Parent = Content,
+		Parent = sectionHosts[name],
 		OnHide = function()
 			if generation == detailGeneration then
 				detailGeneration = detailGeneration + 1
@@ -715,7 +776,8 @@ local function showSection(name)
 	detailGeneration = detailGeneration + 1
 	currentSection = name
 	local generation = detailGeneration
-	local query = name == "Source" and "" or DetailFilter.Text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+	local filter = sectionFilters[name]
+	local query = filter and filter.Text:lower():gsub("^%s+", ""):gsub("%s+$", "") or ""
 	local sectionState = log.Sections[name]
 	sectionState.Name = name
 	sectionState.RequestGeneration = generation
@@ -798,7 +860,31 @@ for name, button in pairs(sectionButtons) do
 	button.MouseButton1Click:Connect(function()
 		showSection(sectionName)
 	end)
+
+	button.MouseEnter:Connect(function()
+		if selectedSectionButton ~= button and animationCache[button] then
+			animationCache[button].enter:Play()
+		end
+	end)
+
+	button.MouseLeave:Connect(function()
+		if selectedSectionButton ~= button and animationCache[button] then
+			animationCache[button].leave:Play()
+		end
+	end)
+
+	local filter = sectionFilters[sectionName]
+
+	if filter then
+		filter.FocusLost:Connect(function(returned)
+			if returned and currentSection == sectionName and isLogAlive(selectedLog) then
+				showSection(sectionName)
+			end
+		end)
+	end
 end
+
+setSelectedSection("Source")
 
 local function openInspector(log)
 	if not isLogAlive(log) then
@@ -806,22 +892,30 @@ local function openInspector(log)
 	end
 
 	selectedLog = log
-	DetailFilter.Text = ""
-	Title.Text = log.ModuleScript.Instance.Name
+
+	for _, filter in pairs(sectionFilters) do
+		filter.Text = ""
+	end
+
+	local moduleName = log.ModuleScript.Instance.Name
+	local nameLength = TextService:GetTextSize(moduleName, 18, "SourceSans", textBounds).X + 20
+	Title.Text = moduleName
+	Title.Size = UDim2.new(0, nameLength, 0, 20)
+	InfoModule.Position = UDim2.new(1, -nameLength, 0, 0)
+	Query.Visible = false
+	ResultsFrame.Visible = false
 	Details.Visible = true
 	showSection("Source")
 end
 
 Back.MouseButton1Click:Connect(function()
+	resumeSection = currentSection or resumeSection
 	detailGeneration = detailGeneration + 1
 	currentSection = nil
+	TextViewer.Hide(detailViewer)
 	Details.Visible = false
-end)
-
-DetailFilter.FocusLost:Connect(function(returned)
-	if returned and currentSection and currentSection ~= "Source" and isLogAlive(selectedLog) then
-		showSection(currentSection)
-	end
+	Query.Visible = true
+	ResultsFrame.Visible = true
 end)
 
 Page:GetPropertyChangedSignal("Visible"):Connect(function()
@@ -1185,7 +1279,10 @@ addModules = function(query)
 	detailGeneration = detailGeneration + 1
 	local generation = scanGeneration
 	currentSection = nil
+	TextViewer.Hide(detailViewer)
 	Details.Visible = false
+	Query.Visible = true
+	ResultsFrame.Visible = true
 	resetMetadataQueue()
 	moduleList:Clear()
 	clearModelSourceCaches()

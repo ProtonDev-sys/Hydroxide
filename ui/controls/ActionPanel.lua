@@ -5,6 +5,7 @@ local DEFAULT_BUTTON_HEIGHT = 22
 local DEFAULT_GAP = 5
 local STATUS_HEIGHT = 20
 local ACTIONS_TOP = STATUS_HEIGHT + 4
+local MINIMUM_RESULTS_HEIGHT = 72
 
 local function trackConnection(connection)
 	if oh and oh.Events then
@@ -19,7 +20,7 @@ local function findTemplate(container)
 		or container:FindFirstChildWhichIsA("GuiButton")
 end
 
-local function makeToolbar(results, height)
+local function makeToolbar(results)
 	if not results or not results.Parent then
 		return nil
 	end
@@ -37,12 +38,9 @@ local function makeToolbar(results, height)
 	toolbar.BorderSizePixel = 0
 	toolbar.ClipsDescendants = true
 	toolbar.Position = results.Position
-	toolbar.Size = UDim2.new(results.Size.X.Scale, results.Size.X.Offset, 0, height)
+	toolbar.Size = UDim2.new(results.Size.X.Scale, results.Size.X.Offset, 0, ACTIONS_TOP)
 	toolbar.ZIndex = math.max(2, results.ZIndex + 1)
 	toolbar.Parent = parent
-
-	results.Position = results.Position + UDim2.new(0, 0, 0, height)
-	results.Size = results.Size - UDim2.new(0, 0, 0, height)
 	return toolbar
 end
 
@@ -119,12 +117,7 @@ function ActionPanel.Install(container, results, options)
 	local minimumCellWidth = math.max(72, math.floor(tonumber(options.MinimumCellWidth) or buttonWidth))
 	local originalResultsPosition = results.Position
 	local originalResultsSize = results.Size
-	local columns = maximumColumns
-	local rows = math.ceil(#actions / columns)
-	local contentHeight = rows * buttonHeight + math.max(0, rows - 1) * gap
-	local actionHeight = contentHeight + 5
-	local toolbarHeight = ACTIONS_TOP + actionHeight + 2
-	local toolbar = makeToolbar(results, toolbarHeight)
+	local toolbar = makeToolbar(results)
 
 	if not toolbar then
 		return nil
@@ -143,8 +136,8 @@ function ActionPanel.Install(container, results, options)
 	actionsFrame.Position = UDim2.new(0, 0, 0, ACTIONS_TOP)
 	actionsFrame.ScrollBarImageColor3 = Color3.fromRGB(92, 92, 92)
 	actionsFrame.ScrollBarThickness = 4
-	actionsFrame.ScrollingDirection = Enum.ScrollingDirection.X
-	actionsFrame.Size = UDim2.new(1, 0, 0, actionHeight)
+	actionsFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+	actionsFrame.Size = UDim2.new(1, 0, 0, buttonHeight + 5)
 	actionsFrame.TopImage = ""
 	actionsFrame.ZIndex = toolbar.ZIndex + 1
 	actionsFrame.Parent = toolbar
@@ -153,24 +146,72 @@ function ActionPanel.Install(container, results, options)
 	layout.CellPadding = UDim2.new(0, gap, 0, gap)
 	layout.CellSize = UDim2.new(0, minimumCellWidth, 0, buttonHeight)
 	layout.FillDirection = Enum.FillDirection.Horizontal
-	layout.FillDirectionMaxCells = columns
+	layout.FillDirectionMaxCells = maximumColumns
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.StartCorner = Enum.StartCorner.TopLeft
 	layout.Parent = actionsFrame
 
-	local function updateLayout()
-		local width = actionsFrame.AbsoluteSize.X
+	local layoutQueued = false
+	local layoutRunning = false
 
-		if width > 0 then
-			local fittedWidth = math.floor((width - gap * (columns - 1)) / columns)
-			local cellWidth = math.max(minimumCellWidth, fittedWidth)
-			local canvasWidth = columns * cellWidth + math.max(0, columns - 1) * gap
-			layout.CellSize = UDim2.new(0, cellWidth, 0, buttonHeight)
-			actionsFrame.CanvasSize = UDim2.new(0, math.max(width, canvasWidth), 0, contentHeight)
+	local function updateLayout()
+		if layoutRunning or not toolbar.Parent or not results.Parent then
+			return
 		end
+
+		layoutRunning = true
+		local width = math.floor(toolbar.AbsoluteSize.X)
+		local parentHeight = toolbar.Parent.AbsoluteSize.Y
+
+		if width > 0 and parentHeight > 0 then
+			local layoutWidth = math.max(1, width - 4)
+			local fittingColumns = math.floor((layoutWidth + gap) / (minimumCellWidth + gap))
+			local columns = math.max(1, math.min(maximumColumns, #actions, fittingColumns))
+			local cellWidth = math.max(1, math.floor((layoutWidth - gap * (columns - 1)) / columns))
+			local rows = math.ceil(#actions / columns)
+			local contentHeight = rows * buttonHeight + math.max(0, rows - 1) * gap
+			local desiredToolbarHeight = ACTIONS_TOP + contentHeight + 7
+			local originalResultsHeight = originalResultsSize.Y.Scale * parentHeight + originalResultsSize.Y.Offset
+			local minimumToolbarHeight = ACTIONS_TOP + buttonHeight + 7
+			local reservedResultsHeight =
+				math.min(MINIMUM_RESULTS_HEIGHT, math.max(0, math.floor(originalResultsHeight - minimumToolbarHeight)))
+			local maximumToolbarHeight = math.max(0, math.floor(originalResultsHeight - reservedResultsHeight))
+			local toolbarHeight = math.min(desiredToolbarHeight, maximumToolbarHeight)
+			local actionHeight = math.max(0, toolbarHeight - ACTIONS_TOP - 2)
+
+			layout.FillDirectionMaxCells = columns
+			layout.CellSize = UDim2.new(0, cellWidth, 0, buttonHeight)
+			toolbar.Position = originalResultsPosition
+			toolbar.Size = UDim2.new(originalResultsSize.X.Scale, originalResultsSize.X.Offset, 0, toolbarHeight)
+			actionsFrame.Size = UDim2.new(1, 0, 0, actionHeight)
+			actionsFrame.CanvasSize = UDim2.new(0, width, 0, contentHeight)
+			actionsFrame.ScrollBarThickness = contentHeight > actionHeight and 4 or 0
+			results.Position = originalResultsPosition + UDim2.new(0, 0, 0, toolbarHeight)
+			results.Size = originalResultsSize - UDim2.new(0, 0, 0, toolbarHeight)
+
+			local maximumScroll = math.max(0, contentHeight - actionHeight)
+			if actionsFrame.CanvasPosition.Y > maximumScroll then
+				actionsFrame.CanvasPosition = Vector2.new(0, maximumScroll)
+			end
+		end
+
+		layoutRunning = false
 	end
 
-	trackConnection(actionsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateLayout))
+	local function queueLayout()
+		if layoutQueued then
+			return
+		end
+
+		layoutQueued = true
+		task.defer(function()
+			layoutQueued = false
+			updateLayout()
+		end)
+	end
+
+	trackConnection(actionsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayout))
+	trackConnection(toolbar.Parent:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayout))
 	task.defer(updateLayout)
 
 	local panel = {
