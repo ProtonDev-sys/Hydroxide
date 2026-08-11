@@ -894,7 +894,7 @@ local function describeDiagnostics()
 
 	table.sort(ignoredPacketIds)
 	lines[#lines + 1] = ""
-	lines[#lines + 1] = ("IGNORED PACKET IDS (%d)"):format(#ignoredPacketIds)
+	lines[#lines + 1] = ("Ignored Packet IDs (%d)"):format(#ignoredPacketIds)
 
 	if #ignoredPacketIds == 0 then
 		lines[#lines + 1] = "  (none)"
