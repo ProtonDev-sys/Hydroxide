@@ -520,6 +520,8 @@ local activeQuery = ""
 local searchResults = {}
 local searchResultHead = 1
 local searchResultTail = 0
+local searchResultsDirty = false
+local hiddenSearchAnchor
 local queueRender
 local rebuildSearchResults
 local selectPacketGroup
@@ -1340,6 +1342,7 @@ end
 
 rebuildSearchResults = function()
 	resetSearchResults()
+	searchResultsDirty = false
 
 	if activeQuery == "" then
 		return
@@ -1352,6 +1355,22 @@ rebuildSearchResults = function()
 
 		if entry and matchesQuery(entry, activeQuery) then
 			appendSearchResult(entry)
+		end
+	end
+end
+
+local function restoreHiddenSearchAnchor()
+	if followingTop or not hiddenSearchAnchor then
+		windowStart = 1
+		return
+	end
+
+	local matching = searchResultCount()
+
+	for chronologicalIndex = searchResultHead, searchResultTail do
+		if searchResults[chronologicalIndex] == hiddenSearchAnchor then
+			windowStart = matching - (chronologicalIndex - searchResultHead + 1) + 1
+			return
 		end
 	end
 end
@@ -1744,8 +1763,20 @@ actionButtons.Diagnostics =
 
 trackConnection(Page:GetPropertyChangedSignal("Visible"):Connect(function()
 	if Page.Visible then
+		if searchResultsDirty then
+			rebuildSearchResults()
+			restoreHiddenSearchAnchor()
+			hiddenSearchAnchor = nil
+		end
+
 		queueRender(false)
 	else
+		if activeQuery ~= "" and (windowStart > 1 or not followingTop) then
+			hiddenSearchAnchor = rows[1] and rows[1].Entry or nil
+		else
+			hiddenSearchAnchor = nil
+		end
+
 		hideViewer()
 	end
 end))
@@ -1757,6 +1788,8 @@ local eventConnection = Methods.ConnectEvent(function(entry, action)
 		selectedPacketKey = nil
 		windowStart = 1
 		resetSearchResults()
+		searchResultsDirty = false
+		hiddenSearchAnchor = nil
 		clearRenderedRows()
 		clearNavigatorButtons(true)
 		hideViewer()
@@ -1774,8 +1807,18 @@ local eventConnection = Methods.ConnectEvent(function(entry, action)
 			end
 		end
 
-		if activeQuery ~= "" and entryBelongsToCurrentSource(entry) and matchesQuery(entry, activeQuery) then
-			removeOldestSearchResult(entry)
+		if hiddenSearchAnchor == entry then
+			hiddenSearchAnchor = nil
+		end
+
+		if activeQuery ~= "" then
+			if Page.Visible then
+				if entryBelongsToCurrentSource(entry) and matchesQuery(entry, activeQuery) then
+					removeOldestSearchResult(entry)
+				end
+			else
+				searchResultsDirty = true
+			end
 		end
 
 		-- Retention removes the oldest entry immediately before indexing the new
@@ -1783,11 +1826,20 @@ local eventConnection = Methods.ConnectEvent(function(entry, action)
 		-- briefly collapse the user's selected packet group back to All.
 		queueRender(false)
 	elseif action == "added" then
-		local belongs = entryBelongsToCurrentSource(entry)
-		local matches = belongs and (activeQuery == "" or matchesQuery(entry, activeQuery))
+		local matches = false
 
-		if activeQuery ~= "" and matches then
-			appendSearchResult(entry)
+		if activeQuery ~= "" then
+			if Page.Visible then
+				matches = entryBelongsToCurrentSource(entry) and matchesQuery(entry, activeQuery)
+
+				if matches then
+					appendSearchResult(entry)
+				end
+			else
+				searchResultsDirty = true
+			end
+		else
+			matches = entryBelongsToCurrentSource(entry)
 		end
 
 		if matches and (windowStart > 1 or not followingTop) then

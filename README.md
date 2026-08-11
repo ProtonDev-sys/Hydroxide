@@ -97,7 +97,7 @@ This fork targets the current [Potassium API reference](https://docs.potassium.p
 * `getscriptclosure` and `getsenv` provide the same lazy closure, environment, proto, constant, function, and source inspection for both running scripts and loaded modules.
 * `hookmetamethod` captures ordinary namecalls on their original thread for caller filtering and stack/source inspection. Potassium's `oth.hook`, `oth.get_root_callback`, `oth.get_original_thread`, and `oth.unhook(target)` provide the direct C-function pass-through, with `hookfunction` retained as a fallback.
 * `getscriptfromthread` preserves calling-script attribution for off-thread hooks.
-* `raknet.add_send_hook`, `raknet.add_receive_hook`, their matching remove functions, and `raknet.send` power a bounded transport-level RakNet inspector when RakNet is enabled in Potassium's own settings. Potassium warns that this facility can carry ban risk; Hydroxide does not enable it automatically.
+* `raknet.add_send_hook`, `raknet.add_receive_hook`, their matching remove functions, and `raknet.send` power a transport-level RakNet inspector with per-packet capture and UI-render limits when RakNet is enabled in Potassium's own settings. Potassium warns that this facility can carry ban risk; Hydroxide does not enable it automatically.
 * `debug.getcallstack` captures bounded call stacks for remote and closure calls when the active hook runs on the original thread.
 * `decompile` powers lazy script, module, and function source inspection without slowing initial UI loading.
 * `restorefunction` and documented `Connection:Enable()` teardown restore hooks and temporarily disabled error connections.
