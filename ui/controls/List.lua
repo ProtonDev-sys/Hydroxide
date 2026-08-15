@@ -1,5 +1,6 @@
 local UserInput = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local Theme = oh.Theme or import("ui/Theme")
 
 local List = {}
 local ListButton = {}
@@ -8,8 +9,8 @@ local lists = {}
 local ctrlHeld = false
 local constants = {
 	tweenTime = TweenInfo.new(0.15),
-	selected = Color3.fromRGB(55, 35, 35),
-	deselected = Color3.fromRGB(35, 35, 35),
+	selected = Theme.Colors.Selection,
+	deselected = Theme.Colors.Row,
 }
 
 function List.new(instance, multiClick)

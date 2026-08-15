@@ -78,6 +78,10 @@ _G.oh = { Settings = {} }
 _G.typeof = function(value)
 	return type(value) == "table" and rawget(value, "__type") or type(value)
 end
+local nativeLoad = load
+_G.loadstring = function(source, chunkName)
+	return nativeLoad(source, chunkName, "t", _G)
+end
 local bufferToStringCalls = 0
 _G.buffer = {
 	len = function(value)
@@ -93,6 +97,20 @@ _G.buffer = {
 }
 
 local builder = dofile(root .. "methods/scriptbuilder.lua")
+
+local generatedSyntaxValid, generatedSyntaxError =
+	builder.validateGeneratedSource("local value = { nested = true }\nreturn value")
+assertEqual(generatedSyntaxValid, true, "generated-source validator accepts valid Luau")
+assertEqual(generatedSyntaxError, nil, "valid generated source has no compiler error")
+
+local normalLoadstring = _G.loadstring
+_G.loadstring = function()
+	return nil, "forced compiler rejection"
+end
+local compilerRejectedSource, compilerRejectedError = builder.buildRemoteScript(remote, "FireServer", { n = 0 })
+assertEqual(compilerRejectedSource, nil, "generated replay is rejected when compilation fails")
+assertContains(compilerRejectedError, "forced compiler rejection", "compiler failure is reported")
+_G.loadstring = normalLoadstring
 
 local function compileAndRun(source)
 	local chunk, compileError = load(source, "generated-replay", "t", _G)

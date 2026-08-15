@@ -3,6 +3,7 @@ local TweenService = game:GetService("TweenService")
 
 local ClosureSpy = {}
 local Methods = import("modules/ClosureSpy")
+local Theme = oh.Theme or import("ui/Theme")
 
 if not hasMethods(Methods.RequiredMethods) then
 	return ClosureSpy
@@ -73,9 +74,9 @@ local icons = {
 local constants = {
 	fadeLength = TweenInfo.new(0.15),
 	textWidth = Vector2.new(1337420, 20),
-	normalColor = Color3.new(1, 1, 1),
-	blockedColor = Color3.fromRGB(170, 0, 0),
-	ignoredColor = Color3.fromRGB(100, 100, 100),
+	normalColor = Theme.Colors.Text,
+	blockedColor = Theme.Colors.Danger,
+	ignoredColor = Theme.Colors.TextDisabled,
 }
 
 oh.Settings = oh.Settings or {}
@@ -89,11 +90,46 @@ local conditionType = Dropdown.new(NewConditionContent.Type)
 local conditionValueType = Dropdown.new(NewConditionContent.ValueType)
 
 for _, valueType in ipairs({
-	"nil", "string", "number", "boolean", "table", "function", "thread", "buffer", "Instance", "EnumItem",
-	"BrickColor", "CFrame", "Color3", "Vector2", "Vector2int16", "Vector3", "Vector3int16", "UDim", "UDim2", "Rect", "Ray", "Region3", "Region3int16",
-	"NumberRange", "NumberSequence", "NumberSequenceKeypoint", "ColorSequence", "ColorSequenceKeypoint",
-	"DateTime", "TweenInfo", "PhysicalProperties", "PathWaypoint", "RaycastParams", "OverlapParams", "Font",
-	"Content", "SharedTable", "Axes", "Faces", "Random",
+	"nil",
+	"string",
+	"number",
+	"boolean",
+	"table",
+	"function",
+	"thread",
+	"buffer",
+	"Instance",
+	"EnumItem",
+	"BrickColor",
+	"CFrame",
+	"Color3",
+	"Vector2",
+	"Vector2int16",
+	"Vector3",
+	"Vector3int16",
+	"UDim",
+	"UDim2",
+	"Rect",
+	"Ray",
+	"Region3",
+	"Region3int16",
+	"NumberRange",
+	"NumberSequence",
+	"NumberSequenceKeypoint",
+	"ColorSequence",
+	"ColorSequenceKeypoint",
+	"DateTime",
+	"TweenInfo",
+	"PhysicalProperties",
+	"PathWaypoint",
+	"RaycastParams",
+	"OverlapParams",
+	"Font",
+	"Content",
+	"SharedTable",
+	"Axes",
+	"Faces",
+	"Random",
 }) do
 	conditionType:AddOption(valueType, oh.Constants.Types[valueType] or oh.Constants.Types.userdata)
 end
@@ -436,10 +472,7 @@ local function showDetailsAsync(title, loadingText, callback, options)
 	local call = selected.callInfo
 	renderDetails(title, loadingText)
 	local function requestIsActive()
-		return uiAlive()
-			and Page.Visible
-			and generation == detailsGeneration
-			and selected.callInfo == call
+		return uiAlive() and Page.Visible and generation == detailsGeneration and selected.callInfo == call
 	end
 
 	task.spawn(function()
@@ -541,6 +574,34 @@ local function argumentSummary(value)
 	return text
 end
 
+local function expandedValue(value, maximumBytes)
+	local rawType = type(value)
+	local valueType = typeof(value)
+
+	if
+		type(formatValueTree) ~= "function"
+		or rawType ~= "table"
+		or (valueType ~= "table" and valueType ~= "SharedTable")
+		or rawget(value, "__hydroxideCaptureMarker") == true
+	then
+		return nil
+	end
+
+	local settings = oh.Settings or {}
+	local ran, result = pcall(formatValueTree, value, {
+		MaxDepth = settings.MaxValueViewDepth or settings.maxValueViewDepth,
+		MaxEntries = settings.MaxValueViewEntries or settings.maxValueViewEntries,
+		MaxTableEntries = settings.MaxValueViewTableEntries or settings.maxValueViewTableEntries,
+		MaxOutputBytes = maximumBytes,
+	})
+
+	if ran and type(result) == "string" and result ~= "" then
+		return result
+	end
+
+	return ran and nil or ("<table inspection failed: %s>"):format(tostring(result))
+end
+
 local function formatTimestamp(timestamp)
 	if type(timestamp) ~= "number" then
 		return "unknown"
@@ -576,6 +637,9 @@ end
 
 local function describePackedValues(title, values)
 	local count = getArgCount(values)
+	local settings = oh.Settings or {}
+	local maximumBytes =
+		math.max(1024, math.floor(tonumber(settings.MaxValueViewBytes or settings.maxValueViewBytes) or 65536))
 	local lines = { title, ("Count: %d"):format(count), "" }
 
 	if count == 0 then
@@ -583,11 +647,32 @@ local function describePackedValues(title, values)
 		return table.concat(lines, "\n")
 	end
 
+	local outputBytes = #title + 32
+
 	for index = 1, count do
 		local value = values[index]
 		local valueType = typeof(value)
-		local detail = valueType == "Instance" and safeInstancePath(value) or argumentSummary(value)
-		lines[#lines + 1] = ("[%02d]  %-18s  %s"):format(index, valueType, detail or "unavailable")
+		local header = ("[%02d]  %s"):format(index, valueType)
+		local remaining = maximumBytes - outputBytes - #header - 2
+
+		if remaining < 256 then
+			lines[#lines + 1] = "... <value viewer output limit reached>"
+			break
+		end
+
+		local expanded = expandedValue(value, remaining)
+
+		if expanded then
+			lines[#lines + 1] = header
+			lines[#lines + 1] = expanded
+			lines[#lines + 1] = ""
+			outputBytes = outputBytes + #header + #expanded + 2
+		else
+			local detail = valueType == "Instance" and safeInstancePath(value) or argumentSummary(value)
+			local line = ("%-24s  %s"):format(header, detail or "unavailable")
+			lines[#lines + 1] = line
+			outputBytes = outputBytes + #line + 1
+		end
 	end
 
 	return table.concat(lines, "\n")
@@ -638,7 +723,10 @@ local function describeScript(scriptInstance, isAlive)
 			local settings = oh and oh.Settings or {}
 			local maximum = math.max(
 				8192,
-				math.min(8388608, math.floor(tonumber(settings.MaxInspectorBytes or settings.maxInspectorBytes) or 524288))
+				math.min(
+					8388608,
+					math.floor(tonumber(settings.MaxInspectorBytes or settings.maxInspectorBytes) or 524288)
+				)
 			)
 			local marker = "\n-- ... source truncated by the inspector safety limit ..."
 
@@ -861,10 +949,7 @@ local function conditionIsNaN(value)
 end
 
 local function conditionBranchIsEmpty(branch)
-	return branch
-		and next(branch.types) == nil
-		and next(branch.values) == nil
-		and branch.nan ~= true
+	return branch and next(branch.types) == nil and next(branch.values) == nil and branch.nan ~= true
 end
 
 function Condition.new(closure, status, index, value, type)
@@ -1191,7 +1276,9 @@ renderLatestCalls = function(log, rebuild)
 
 			if instance and instance.Parent and instance.Visible then
 				local order = instance.LayoutOrder
-				local relativeBottom = instance.AbsolutePosition.Y - LogsResults.AbsolutePosition.Y + instance.AbsoluteSize.Y
+				local relativeBottom = instance.AbsolutePosition.Y
+					- LogsResults.AbsolutePosition.Y
+					+ instance.AbsoluteSize.Y
 
 				if relativeBottom > 0 and (not anchorOrder or order < anchorOrder) then
 					anchorCall = call
@@ -1298,13 +1385,7 @@ queueLogRender = function(log)
 	task.defer(function()
 		queuedLogRenders[log] = nil
 
-		if
-			uiAlive()
-			and Page.Visible
-			and ClosureLogs.Visible
-			and selected.hookLog == log
-			and dirtyLogRenders[log]
-		then
+		if uiAlive() and Page.Visible and ClosureLogs.Visible and selected.hookLog == log and dirtyLogRenders[log] then
 			renderLatestCalls(log)
 		end
 	end)
@@ -1800,7 +1881,12 @@ NewConditionButtons.Add.MouseButton1Click:Connect(function()
 	elseif not argIndex then
 		return MessageBox.Show("Error", "Argument index must be a positive whole number", MessageType.OK)
 	elseif valueType == "Value" then
-		if selectedType == "nil" or selectedType == "table" or selectedType == "function" or selectedType == "thread" then
+		if
+			selectedType == "nil"
+			or selectedType == "table"
+			or selectedType == "function"
+			or selectedType == "thread"
+		then
 			return MessageBox.Show("Error", "Use a Type condition for " .. selectedType .. " arguments", MessageType.OK)
 		elseif selectedType == "string" then
 			value = value
@@ -1867,7 +1953,11 @@ NewConditionButtons.Add.MouseButton1Click:Connect(function()
 	end
 
 	if not added then
-		return MessageBox.Show("Condition Not Added", tostring(addError or "That condition already exists"), MessageType.OK)
+		return MessageBox.Show(
+			"Condition Not Added",
+			tostring(addError or "That condition already exists"),
+			MessageType.OK
+		)
 	end
 
 	if byType then
