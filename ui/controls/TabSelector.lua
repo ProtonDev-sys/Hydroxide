@@ -1,4 +1,5 @@
 local TweenService = game:GetService("TweenService")
+local Theme = oh.Theme or import("ui/Theme")
 
 local TabSelector = {}
 
@@ -20,10 +21,10 @@ local requiredMethods = {
 
 local constants = {
     fadeLength = TweenInfo.new(0.15),
-    tabSelected = Color3.fromRGB(45, 45, 45),
-    iconSelected = Color3.fromRGB(255, 255, 255),
-    tabUnselected = Color3.fromRGB(20, 20, 20),
-    iconUnselected = Color3.fromRGB(127, 127, 127)
+    tabSelected = Theme.Colors.ControlHover,
+    iconSelected = Theme.Colors.Text,
+    tabUnselected = Theme.Colors.Background,
+    iconUnselected = Theme.Colors.TextDisabled
 }
 
 local selectedTab 

@@ -121,6 +121,27 @@ local function commentText(value, maxLength)
 	return value
 end
 
+local function validateGeneratedSource(source, chunkName)
+	if type(source) ~= "string" or source == "" then
+		return false, "generated source is empty"
+	elseif type(loadstring) ~= "function" then
+		-- Unit-test and compatibility runtimes may expose load rather than
+		-- loadstring. Callers still receive bounded source and can validate it
+		-- with their own compiler; Potassium provides loadstring.
+		return true
+	end
+
+	local ran, chunk, compileError = pcall(loadstring, source, chunkName or "@HydroxideGeneratedReplay")
+
+	if not ran then
+		return false, commentText(chunk, 360)
+	elseif type(chunk) ~= "function" then
+		return false, commentText(compileError or "the compiler returned no function", 360)
+	end
+
+	return true
+end
+
 local function getArgCount(args)
 	if type(args) ~= "table" then
 		return 0
@@ -830,9 +851,16 @@ local function buildRemoteScript(remoteInstance, method, args, callInfo)
 		return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
 	end
 
+	local valid, validationError = validateGeneratedSource(generated, "@HydroxideRemoteReplay")
+
+	if not valid then
+		return nil, "Generated replay source did not compile: " .. tostring(validationError)
+	end
+
 	return generated
 end
 
 methods.buildRemoteScript = buildRemoteScript
 methods.getReplayInstancePath = getInstanceExpression
+methods.validateGeneratedSource = validateGeneratedSource
 return methods

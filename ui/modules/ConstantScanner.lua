@@ -3,6 +3,7 @@ local TextService = game:GetService("TextService")
 local ConstantScanner = {}
 local ClosureSpy = import("modules/ClosureSpy")
 local Methods = import("modules/ConstantScanner")
+local Theme = oh.Theme or import("ui/Theme")
 
 if not hasMethods(Methods.RequiredMethods) then
     return ConstantScanner
@@ -35,8 +36,8 @@ local viewConstantsContext = ContextMenuButton.new("rbxassetid://5179169654", "V
 local getScriptContext = ContextMenuButton.new("rbxassetid://4891705738", "Get Script Path")
 
 local constants = {
-    tempConstantColor = Color3.fromRGB(40, 20, 20),
-    tempBorderColor = Color3.fromRGB(20, 0, 0)
+    tempConstantColor = Theme.Colors.Selection,
+    tempBorderColor = Theme.Colors.Danger
 }
 
 constantList:BindContextMenu(ContextMenu.new({ inspectFunctionContext, spyClosureContext, viewConstantsContext, getScriptContext }))
@@ -129,7 +130,7 @@ function Log.new(closure)
     end
 
     if closure.Name == "Unnamed function" then
-        button:FindFirstChild("Name").TextColor3 = Color3.fromRGB(127, 127, 127)
+        button:FindFirstChild("Name").TextColor3 = Theme.Colors.TextDisabled
     end
 
     button:FindFirstChild("Name").Text = closure.Name

@@ -1,4 +1,5 @@
 local ActionPanel = {}
+local Theme = oh.Theme or import("ui/Theme")
 
 local DEFAULT_BUTTON_WIDTH = 96
 local DEFAULT_BUTTON_HEIGHT = 22
@@ -52,7 +53,7 @@ local function makeStatus(toolbar)
 	status.Position = UDim2.new(0, 2, 0, 0)
 	status.Size = UDim2.new(1, -4, 0, STATUS_HEIGHT)
 	status.Text = "Select a captured call to inspect"
-	status.TextColor3 = Color3.fromRGB(155, 155, 155)
+	status.TextColor3 = Theme.Colors.TextMuted
 	status.TextSize = 15
 	status.TextTruncate = Enum.TextTruncate.AtEnd
 	status.TextXAlignment = Enum.TextXAlignment.Left
@@ -134,7 +135,7 @@ function ActionPanel.Install(container, results, options)
 	actionsFrame.ClipsDescendants = true
 	actionsFrame.MidImage = ""
 	actionsFrame.Position = UDim2.new(0, 0, 0, ACTIONS_TOP)
-	actionsFrame.ScrollBarImageColor3 = Color3.fromRGB(92, 92, 92)
+	actionsFrame.ScrollBarImageColor3 = Theme.Colors.Scrollbar
 	actionsFrame.ScrollBarThickness = 4
 	actionsFrame.ScrollingDirection = Enum.ScrollingDirection.Y
 	actionsFrame.Size = UDim2.new(1, 0, 0, buttonHeight + 5)

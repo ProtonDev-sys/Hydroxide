@@ -4,6 +4,7 @@ local TextService = game:GetService("TextService")
 local UpvalueScanner = {}
 local ClosureSpy = import("modules/ClosureSpy")
 local Methods = import("modules/UpvalueScanner")
+local Theme = oh.Theme or import("ui/Theme")
 
 if not hasMethods(Methods.RequiredMethods) then
     return UpvalueScanner
@@ -82,9 +83,9 @@ local upvalueTypeDropdown = Dropdown.new(modifyUpvalueType)
 local elementTypeDropdown = Dropdown.new(modifyElementType)
 
 local constants = {
-    tempElementColor = Color3.fromRGB(30, 10, 10),
-    tempUpvalueColor = Color3.fromRGB(40, 20, 20),
-    tempBorderColor = Color3.fromRGB(20, 0, 0)
+    tempElementColor = Theme.Colors.Selection,
+    tempUpvalueColor = Theme.Colors.Selection,
+    tempBorderColor = Theme.Colors.Danger
 }
 
 local function typeMismatchMessage()

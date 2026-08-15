@@ -5,6 +5,7 @@ local RemoteSpy = {}
 local Methods = import("modules/RemoteSpy")
 local ClosureSpy = import("modules/ClosureSpy")
 local Closure = import("objects/Closure")
+local Theme = oh.Theme or import("ui/Theme")
 
 if not hasMethods(Methods.RequiredMethods) then
 	return RemoteSpy
@@ -95,9 +96,9 @@ local icons = {
 local constants = {
 	fadeLength = TweenInfo.new(0.15),
 	textWidth = Vector2.new(1337420, 20),
-	normalColor = Color3.new(1, 1, 1),
-	blockedColor = Color3.fromRGB(170, 0, 0),
-	ignoredColor = Color3.fromRGB(100, 100, 100),
+	normalColor = Theme.Colors.Text,
+	blockedColor = Theme.Colors.Danger,
+	ignoredColor = Theme.Colors.TextDisabled,
 	maxHexBytes = 4096,
 }
 
@@ -507,7 +508,10 @@ end
 
 local function argumentSummary(value)
 	if type(value) == "table" and rawget(value, "__hydroxideCaptureMarker") == true then
-		return ("%s capture unavailable: %s"):format(tostring(value.Kind or "value"), tostring(value.Detail or "unknown reason"))
+		return ("%s capture unavailable: %s"):format(
+			tostring(value.Kind or "value"),
+			tostring(value.Detail or "unknown reason")
+		)
 	end
 
 	if type(summarizeValue) == "function" then
@@ -547,6 +551,34 @@ local function argumentSummary(value)
 	return truncate(tostring(value), 140)
 end
 
+local function expandedValue(value, maximumBytes)
+	local rawType = type(value)
+	local valueType = typeof(value)
+
+	if
+		type(formatValueTree) ~= "function"
+		or rawType ~= "table"
+		or (valueType ~= "table" and valueType ~= "SharedTable")
+		or rawget(value, "__hydroxideCaptureMarker") == true
+	then
+		return nil
+	end
+
+	local settings = oh.Settings or {}
+	local ran, result = pcall(formatValueTree, value, {
+		MaxDepth = settings.MaxValueViewDepth or settings.maxValueViewDepth,
+		MaxEntries = settings.MaxValueViewEntries or settings.maxValueViewEntries,
+		MaxTableEntries = settings.MaxValueViewTableEntries or settings.maxValueViewTableEntries,
+		MaxOutputBytes = maximumBytes,
+	})
+
+	if ran and type(result) == "string" and result ~= "" then
+		return result
+	end
+
+	return ran and nil or ("<table inspection failed: %s>"):format(tostring(result))
+end
+
 local function formatTimestamp(timestamp)
 	if type(timestamp) ~= "number" then
 		return "unknown"
@@ -582,6 +614,9 @@ end
 
 local function describePackedValues(title, values)
 	local count = getArgCount(values)
+	local settings = oh.Settings or {}
+	local maximumBytes =
+		math.max(1024, math.floor(tonumber(settings.MaxValueViewBytes or settings.maxValueViewBytes) or 65536))
 	local lines = {
 		title,
 		("Count: %d"):format(count),
@@ -593,11 +628,32 @@ local function describePackedValues(title, values)
 		return table.concat(lines, "\n")
 	end
 
+	local outputBytes = #title + 32
+
 	for index = 1, count do
 		local value = values[index]
 		local valueType = typeof(value)
-		local detail = valueType == "Instance" and safeInstancePath(value) or argumentSummary(value)
-		lines[#lines + 1] = ("[%02d]  %-18s  %s"):format(index, valueType, detail or "unavailable")
+		local header = ("[%02d]  %s"):format(index, valueType)
+		local remaining = maximumBytes - outputBytes - #header - 2
+
+		if remaining < 256 then
+			lines[#lines + 1] = "... <value viewer output limit reached>"
+			break
+		end
+
+		local expanded = expandedValue(value, remaining)
+
+		if expanded then
+			lines[#lines + 1] = header
+			lines[#lines + 1] = expanded
+			lines[#lines + 1] = ""
+			outputBytes = outputBytes + #header + #expanded + 2
+		else
+			local detail = valueType == "Instance" and safeInstancePath(value) or argumentSummary(value)
+			local line = ("%-24s  %s"):format(header, detail or "unavailable")
+			lines[#lines + 1] = line
+			outputBytes = outputBytes + #line + 1
+		end
 	end
 
 	return table.concat(lines, "\n")
@@ -648,7 +704,10 @@ local function describeScript(scriptInstance, isAlive)
 			local settings = oh and oh.Settings or {}
 			local maximum = math.max(
 				8192,
-				math.min(8388608, math.floor(tonumber(settings.MaxInspectorBytes or settings.maxInspectorBytes) or 524288))
+				math.min(
+					8388608,
+					math.floor(tonumber(settings.MaxInspectorBytes or settings.maxInspectorBytes) or 524288)
+				)
 			)
 			local marker = "\n-- ... source truncated by the inspector safety limit ..."
 
@@ -772,7 +831,10 @@ local function describeDiagnostics()
 		),
 		("Capture route: %s"):format(tostring(callInfo.caller and callInfo.caller.captureSource or "unknown")),
 		("Visible row: %s"):format(
-			selected.callPodButton and selected.callPodButton.Instance and selected.callPodButton.Instance.Parent and "yes"
+			selected.callPodButton
+					and selected.callPodButton.Instance
+					and selected.callPodButton.Instance.Parent
+					and "yes"
 				or "no (selection retained in memory)"
 		),
 		("Remote blocked: %s"):format(tostring(remoteModel and remoteModel.Blocked == true)),
@@ -836,7 +898,8 @@ local function hasStringArg()
 	for index = 1, argCount do
 		local value = args[index]
 
-		if type(value) == "string"
+		if
+			type(value) == "string"
 			or typeof(value) == "buffer"
 			or (type(value) == "table" and value.__hydroxideCaptureMarker == true and type(value.Preview) == "string")
 		then
@@ -951,10 +1014,7 @@ local function conditionIsNaN(value)
 end
 
 local function conditionBranchIsEmpty(branch)
-	return branch
-		and next(branch.types) == nil
-		and next(branch.values) == nil
-		and branch.nan ~= true
+	return branch and next(branch.types) == nil and next(branch.values) == nil and branch.nan ~= true
 end
 
 function Condition.new(remote, status, index, value, type)
@@ -1269,7 +1329,9 @@ renderLatestCalls = function(log, rebuild)
 
 			if instance and instance.Parent and instance.Visible then
 				local order = instance.LayoutOrder
-				local relativeBottom = instance.AbsolutePosition.Y - LogsResults.AbsolutePosition.Y + instance.AbsoluteSize.Y
+				local relativeBottom = instance.AbsolutePosition.Y
+					- LogsResults.AbsolutePosition.Y
+					+ instance.AbsoluteSize.Y
 
 				if relativeBottom > 0 and (not anchorOrder or order < anchorOrder) then
 					anchorCall = call
@@ -1342,11 +1404,7 @@ renderLatestCalls = function(log, rebuild)
 	remoteLogs:QueueRecalculate()
 
 	task.defer(function()
-		if not pageIsActive()
-			or selected.remoteLog ~= log
-			or not RemoteLogs.Visible
-			or not LogsResults.Parent
-		then
+		if not pageIsActive() or selected.remoteLog ~= log or not RemoteLogs.Visible or not LogsResults.Parent then
 			return
 		end
 
@@ -1370,7 +1428,8 @@ local function flushLogRenders()
 	queuedLogRenders = {}
 
 	for log in pairs(pending) do
-		if pageIsActive()
+		if
+			pageIsActive()
 			and selected.remoteLog == log
 			and log.Button
 			and log.Button.Instance
@@ -1845,7 +1904,6 @@ local function parseHexBuffer(text)
 	return result
 end
 
-
 local function parseConditionValue(valueType, text)
 	if valueType == "nil" then
 		return nil, "Use a Type condition to match nil arguments"
@@ -1936,11 +1994,7 @@ NewConditionButtons.Add.MouseButton1Click:Connect(function()
 	local conditionLog = selected.conditionLog
 	local selectedRemote = conditionLog and conditionLog.Remote
 
-	if
-		not selectedRemote
-		or not selectedRemote.Instance
-		or currentLogs[selectedRemote.Instance] ~= conditionLog
-	then
+	if not selectedRemote or not selectedRemote.Instance or currentLogs[selectedRemote.Instance] ~= conditionLog then
 		newRemoteCondition:Hide()
 		setStatusSafely("Condition target is no longer available")
 		return
@@ -1977,7 +2031,11 @@ NewConditionButtons.Add.MouseButton1Click:Connect(function()
 	end
 
 	if not added then
-		return MessageBox.Show("Condition Not Added", tostring(addError or "That condition already exists"), MessageType.OK)
+		return MessageBox.Show(
+			"Condition Not Added",
+			tostring(addError or "That condition already exists"),
+			MessageType.OK
+		)
 	end
 
 	if byType then
@@ -2020,7 +2078,8 @@ pathContext:SetCallback(function()
 	setClipboard(getInstancePath(selectedInstance))
 	task.wait(0.25)
 
-	if pageIsActive()
+	if
+		pageIsActive()
 		and generation == detailsGeneration
 		and selected.logContext
 		and selected.logContext.Remote.Instance == selectedInstance
@@ -2098,7 +2157,8 @@ local function getSelectedLogs()
 		local remote = log and log.Remote
 		local remoteInstance = remote and remote.Instance
 
-		if log
+		if
+			log
 			and not seen[log]
 			and log.Button == button
 			and instance
@@ -2123,7 +2183,8 @@ local function getSelectedConditions()
 		local condition = button.Condition
 		local instance = button.Instance
 
-		if condition
+		if
+			condition
 			and not seen[condition]
 			and condition.Button == button
 			and condition.Remote == currentRemote
@@ -2477,7 +2538,10 @@ local function repeatSelectedCall()
 	end)
 
 	if callInfo.replayable == false then
-		return showDetails("Repeat Call Unavailable", "This call contains a truncated or unavailable captured value, so replay is disabled.")
+		return showDetails(
+			"Repeat Call Unavailable",
+			"This call contains a truncated or unavailable captured value, so replay is disabled."
+		)
 	elseif not method or not callableRan or type(callable) ~= "function" then
 		return showDetails("Repeat Call Failed", "No callable method was available for this remote.")
 	elseif remoteModel.Blocked then
@@ -2489,11 +2553,11 @@ local function repeatSelectedCall()
 
 	local replayStarted = false
 	local confirmation = ("Run %s on %s with %d captured argument%s?\n\nReplaying a captured call can change game state."):format(
-			method,
-			remoteInstance.Name,
-			argCount,
-			argCount == 1 and "" or "s"
-		)
+		method,
+		remoteInstance.Name,
+		argCount,
+		argCount == 1 and "" or "s"
+	)
 
 	local function runReplay()
 		if replayStarted or not pageIsActive() or selected.callInfo ~= callInfo then
@@ -2619,7 +2683,8 @@ local function describeStringValues(args, asHex)
 	for index = 1, argCount do
 		local value = args[index]
 
-		if type(value) == "string"
+		if
+			type(value) == "string"
 			or typeof(value) == "buffer"
 			or (type(value) == "table" and value.__hydroxideCaptureMarker == true and type(value.Preview) == "string")
 		then
@@ -2662,7 +2727,8 @@ local function toggleHexView()
 	for idx = 1, argCount do
 		local arg = selected.args[idx]
 
-		if type(arg) == "string"
+		if
+			type(arg) == "string"
 			or typeof(arg) == "buffer"
 			or (type(arg) == "table" and arg.__hydroxideCaptureMarker == true and type(arg.Preview) == "string")
 		then

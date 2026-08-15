@@ -8,16 +8,16 @@ if oh.Cache["ui/main"] then
 	return Interface
 end
 
+local Layout = import("ui/Layout")
+local Theme = import("ui/Theme")
+
 local Base = Interface.Base
 local Open = Interface.Open
 local Drag = Base.Drag
 local Status = Base.Status
 local Collapse = Drag.Collapse
 
-local FALLBACK_VIEWPORT = Vector2.new(1280, 720)
-local MINIMUM_SIZE = Vector2.new(720, 480)
-local MAXIMUM_SIZE = Vector2.new(1280, 760)
-local VIEWPORT_MARGIN = 8
+local FALLBACK_VIEWPORT = Vector2.new(Layout.ReferenceViewportWidth, Layout.ReferenceViewportHeight)
 
 local function getViewport()
 	local camera = workspace.CurrentCamera
@@ -30,24 +30,13 @@ local function getViewport()
 	return viewport
 end
 
-local function getSizeBounds(viewport)
-	local availableWidth = math.max(1, math.floor(viewport.X - VIEWPORT_MARGIN * 2))
-	local availableHeight = math.max(1, math.floor(viewport.Y - VIEWPORT_MARGIN * 2))
-	local maximumWidth = math.min(MAXIMUM_SIZE.X, availableWidth)
-	local maximumHeight = math.min(MAXIMUM_SIZE.Y, availableHeight)
-	local minimumWidth = math.min(MINIMUM_SIZE.X, maximumWidth)
-	local minimumHeight = math.min(MINIMUM_SIZE.Y, maximumHeight)
-	return minimumWidth, minimumHeight, maximumWidth, maximumHeight
-end
-
-local function clamp(value, minimum, maximum)
-	return math.max(minimum, math.min(maximum, value))
-end
-
 local initialViewport = getViewport()
-local _, _, baseWidth, baseHeight = getSizeBounds(initialViewport)
-local baseX = math.floor((initialViewport.X - baseWidth) / 2)
-local baseY = math.floor((initialViewport.Y - baseHeight) / 2)
+local baseWidth, baseHeight = Layout.GetDefaultSize(initialViewport.X, initialViewport.Y)
+local baseX, baseY = Layout.GetCenteredPosition(initialViewport.X, initialViewport.Y, baseWidth, baseHeight)
+
+oh.Theme = Theme
+Theme.Apply(Interface)
+oh.Events.Theme = Interface.DescendantAdded:Connect(Theme.ApplyObject)
 
 Base.Size = UDim2.new(0, baseWidth, 0, baseHeight)
 Base.Position = UDim2.new(0, baseX, 0, baseY)
@@ -159,6 +148,8 @@ local initialized, initializationError = xpcall(function()
 	local gestureStartSize
 	local windowPosition = Vector2.new(baseX, baseY)
 	local windowSize = Vector2.new(baseWidth, baseHeight)
+	local relativeWindowSize = Vector2.new(1, 1)
+	local lastViewport = initialViewport
 	local viewportConnection
 
 	local function trackConnection(connection)
@@ -188,19 +179,31 @@ local initialized, initializationError = xpcall(function()
 		Open.Position = menuOpen and constants.conceal or constants.reveal
 	end
 
-	local function clampWindowToViewport()
+	local function fitWindowToViewport()
 		local viewport = getViewport()
-		local minimumWidth, minimumHeight, maximumWidth, maximumHeight = getSizeBounds(viewport)
-		local width = clamp(math.floor(windowSize.X), minimumWidth, maximumWidth)
-		local height = clamp(math.floor(windowSize.Y), minimumHeight, maximumHeight)
-		local maximumX = math.max(VIEWPORT_MARGIN, math.floor(viewport.X - VIEWPORT_MARGIN - width))
-		local maximumY = math.max(VIEWPORT_MARGIN, math.floor(viewport.Y - VIEWPORT_MARGIN - height))
+		local positionX, positionY, width, height
+
+		if viewport.X ~= lastViewport.X or viewport.Y ~= lastViewport.Y then
+			local defaultWidth, defaultHeight = Layout.GetDefaultSize(viewport.X, viewport.Y)
+			positionX, positionY, width, height = Layout.ScaleWindow(
+				lastViewport.X,
+				lastViewport.Y,
+				viewport.X,
+				viewport.Y,
+				windowPosition.X,
+				windowPosition.Y,
+				windowSize.X,
+				windowSize.Y,
+				defaultWidth * relativeWindowSize.X,
+				defaultHeight * relativeWindowSize.Y
+			)
+			windowPosition = Vector2.new(positionX, positionY)
+			lastViewport = viewport
+		else
+			width, height = Layout.FitSize(viewport.X, viewport.Y, windowSize.X, windowSize.Y)
+		end
 
 		windowSize = Vector2.new(width, height)
-		windowPosition = Vector2.new(
-			clamp(math.floor(windowPosition.X), VIEWPORT_MARGIN, maximumX),
-			clamp(math.floor(windowPosition.Y), VIEWPORT_MARGIN, maximumY)
-		)
 		applyWindowLayout()
 	end
 
@@ -224,7 +227,7 @@ local initialized, initializationError = xpcall(function()
 			local grip = Instance.new("Frame")
 			grip.Name = "Grip" .. index
 			grip.AnchorPoint = Vector2.new(1, 0.5)
-			grip.BackgroundColor3 = Color3.fromRGB(145, 145, 145)
+			grip.BackgroundColor3 = Theme.Colors.ResizeGrip
 			grip.BackgroundTransparency = 0.15
 			grip.BorderSizePixel = 0
 			grip.Position = UDim2.new(1, -2, 1, -(index * 4 - 1))
@@ -272,20 +275,24 @@ local initialized, initializationError = xpcall(function()
 		local viewport = getViewport()
 
 		if activeGesture == "move" then
-			local maximumX = math.max(VIEWPORT_MARGIN, viewport.X - VIEWPORT_MARGIN - windowSize.X)
-			local maximumY = math.max(VIEWPORT_MARGIN, viewport.Y - VIEWPORT_MARGIN - windowSize.Y)
-			windowPosition = Vector2.new(
-				clamp(math.floor(gestureStartPosition.X + delta.X), VIEWPORT_MARGIN, maximumX),
-				clamp(math.floor(gestureStartPosition.Y + delta.Y), VIEWPORT_MARGIN, maximumY)
+			local positionX, positionY = Layout.GetDraggedPosition(
+				gestureStartPosition.X,
+				gestureStartPosition.Y,
+				delta.X,
+				delta.Y
 			)
+			windowPosition = Vector2.new(positionX, positionY)
 		elseif activeGesture == "resize" then
-			local minimumWidth, minimumHeight, maximumWidth, maximumHeight = getSizeBounds(viewport)
-			maximumWidth = math.min(maximumWidth, viewport.X - VIEWPORT_MARGIN - gestureStartPosition.X)
-			maximumHeight = math.min(maximumHeight, viewport.Y - VIEWPORT_MARGIN - gestureStartPosition.Y)
-			windowSize = Vector2.new(
-				clamp(math.floor(gestureStartSize.X + delta.X), minimumWidth, maximumWidth),
-				clamp(math.floor(gestureStartSize.Y + delta.Y), minimumHeight, maximumHeight)
+			local width, height = Layout.FitSize(
+				viewport.X,
+				viewport.Y,
+				gestureStartSize.X + delta.X,
+				gestureStartSize.Y + delta.Y
 			)
+			windowSize = Vector2.new(width, height)
+
+			local defaultWidth, defaultHeight = Layout.GetDefaultSize(viewport.X, viewport.Y)
+			relativeWindowSize = Vector2.new(width / defaultWidth, height / defaultHeight)
 		end
 
 		applyWindowLayout()
@@ -307,7 +314,7 @@ local initialized, initializationError = xpcall(function()
 
 	local function updateLayout()
 		cancelGesture()
-		clampWindowToViewport()
+		fitWindowToViewport()
 	end
 
 	local function bindViewport()

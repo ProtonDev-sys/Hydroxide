@@ -1,6 +1,7 @@
 local CoreGui = game:GetService("CoreGui")
 local TextService = game:GetService("TextService")
 local UserInput = game:GetService("UserInputService")
+local Theme = oh.Theme or import("ui/Theme")
 
 local TextViewer = {}
 local defaultViewer
@@ -89,7 +90,7 @@ local function makeText(parent, text, size, position, zIndex)
 	label.BackgroundTransparency = 1
 	label.Font = Enum.Font.SourceSans
 	label.Text = text
-	label.TextColor3 = Color3.fromRGB(235, 235, 235)
+	label.TextColor3 = Theme.Colors.Text
 	label.TextSize = 18
 	label.TextTruncate = Enum.TextTruncate.AtEnd
 	label.TextXAlignment = Enum.TextXAlignment.Left
@@ -104,11 +105,11 @@ end
 local function makeButton(parent, text, position, zIndex)
 	local button = Instance.new("TextButton")
 	button.AutoButtonColor = true
-	button.BackgroundColor3 = Color3.fromRGB(42, 42, 42)
+	button.BackgroundColor3 = Theme.Colors.Control
 	button.BorderSizePixel = 0
 	button.Font = Enum.Font.SourceSans
 	button.Text = text
-	button.TextColor3 = Color3.fromRGB(240, 240, 240)
+	button.TextColor3 = Theme.Colors.Text
 	button.TextSize = 17
 	button.TextTruncate = Enum.TextTruncate.AtEnd
 	button.Size = UDim2.new(0, 68, 0, 26)
@@ -161,7 +162,7 @@ end
 local function makeViewer(parent, sourceDock, pages)
 	local overlay = Instance.new("Frame")
 	overlay.Name = "HydroxideIntegratedTextViewer"
-	overlay.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+	overlay.BackgroundColor3 = Theme.Colors.Overlay
 	overlay.BorderSizePixel = 0
 	overlay.ClipsDescendants = true
 	overlay.Size = UDim2.new(1, 0, 1, 0)
@@ -172,7 +173,7 @@ local function makeViewer(parent, sourceDock, pages)
 
 	local panel = Instance.new("Frame")
 	panel.Name = "Panel"
-	panel.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
+	panel.BackgroundColor3 = Theme.Colors.Surface
 	panel.BorderSizePixel = 0
 	panel.Position = UDim2.new(0, 5, 0, 5)
 	panel.Size = UDim2.new(1, -10, 1, -10)
@@ -184,7 +185,7 @@ local function makeViewer(parent, sourceDock, pages)
 	corner.Parent = panel
 
 	local stroke = Instance.new("UIStroke")
-	stroke.Color = Color3.fromRGB(65, 65, 65)
+	stroke.Color = Theme.Colors.Border
 	stroke.Thickness = 1
 	stroke.Parent = panel
 
@@ -195,7 +196,7 @@ local function makeViewer(parent, sourceDock, pages)
 	local scroller = Instance.new("ScrollingFrame")
 	scroller.Name = "Scroll"
 	scroller.Active = true
-	scroller.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+	scroller.BackgroundColor3 = Theme.Colors.CodeBackground
 	scroller.BorderSizePixel = 0
 	scroller.BottomImage = ""
 	scroller.CanvasPosition = Vector2.new()
@@ -225,7 +226,7 @@ local function makeViewer(parent, sourceDock, pages)
 	actionFrame.ClipsDescendants = true
 	actionFrame.MidImage = ""
 	actionFrame.Position = UDim2.new(0, 8, 1, -38)
-	actionFrame.ScrollBarImageColor3 = Color3.fromRGB(92, 92, 92)
+	actionFrame.ScrollBarImageColor3 = Theme.Colors.Scrollbar
 	actionFrame.ScrollBarThickness = 0
 	actionFrame.ScrollingDirection = Enum.ScrollingDirection.Y
 	actionFrame.Size = UDim2.new(1, -16, 0, 30)
@@ -248,7 +249,7 @@ local function makeViewer(parent, sourceDock, pages)
 	textLabel.BackgroundTransparency = 1
 	textLabel.Font = Enum.Font.Code
 	textLabel.Text = ""
-	textLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+	textLabel.TextColor3 = Theme.Colors.Text
 	textLabel.TextSize = 14
 	textLabel.TextWrapped = false
 	textLabel.TextXAlignment = Enum.TextXAlignment.Left
@@ -274,7 +275,7 @@ local function makeViewer(parent, sourceDock, pages)
 		local splitterLine = Instance.new("Frame")
 		splitterLine.Name = "Line"
 		splitterLine.AnchorPoint = Vector2.new(0, 0.5)
-		splitterLine.BackgroundColor3 = Color3.fromRGB(155, 155, 155)
+		splitterLine.BackgroundColor3 = Theme.Colors.TextMuted
 		splitterLine.BorderSizePixel = 0
 		splitterLine.Position = UDim2.new(0, 2, 0.5, 0)
 		splitterLine.Size = UDim2.new(0, 2, 0, 34)
