@@ -1,4 +1,8 @@
 local TextService = game:GetService("TextService")
+local UserInputService = game:GetService("UserInputService")
+
+local ControlUtil = import("ui/ControlUtil")
+local Theme = (oh and oh.Theme) or import("ui/Theme")
 
 local Interface = import("rbxassetid://11389137937")
 local Base = Interface.Base
@@ -6,135 +10,170 @@ local Object = Base.MessageBox
 local Shadow = Base.MessageBoxShadow
 
 local MessageBox = {}
-local MessageType = {}
-
-local selectedButtons
-local firstClickEvent 
-local secondClickEvent
-
-local constants = {
-    dynamicWidth = Vector2.new(133742069, 25),
-    dynamicHeight = Vector2.new(Object.AbsoluteSize.X, 133742069)
+local MessageType = {
+	OK = 1,
+	OKCancel = 2,
+	YesNo = 3,
 }
 
+local activeDialog
+local buttonConnections = {}
+local TEXT_SIZE = Theme.Typography.BodyTextSize
+local DYNAMIC_TEXT_BOUNDS = Vector2.new(100000, 100000)
+
+local function disconnectButtons()
+	ControlUtil.DisconnectAll(buttonConnections)
+	buttonConnections = {}
+end
+
 local function hideButtonGroups(buttons)
-    for _, child in ipairs(buttons:GetChildren()) do
-        if child:IsA("GuiObject") then
-            child.Visible = false
-        end
-    end
+	for _, child in ipairs(buttons:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child.Visible = false
+		end
+	end
 end
 
 local function layoutButtons(group, first, second)
-    if not group then
-        return
-    end
+	if not group or not first then
+		return
+	end
 
-    group.AnchorPoint = Vector2.new(0, 0)
-    group.Position = UDim2.new(0, 10, 1, -38)
-    group.Size = UDim2.new(1, -20, 0, 30)
+	local height = Theme.Metrics.ControlHeight
+	local gap = Theme.Metrics.Gap
+	local width = 96
 
-    if second then
-        first.AnchorPoint = Vector2.new(0, 0)
-        second.AnchorPoint = Vector2.new(0, 0)
-        first.Position = UDim2.new(0.5, -95, 0, 2)
-        second.Position = UDim2.new(0.5, 5, 0, 2)
-        first.Size = UDim2.new(0, 90, 0, 25)
-        second.Size = UDim2.new(0, 90, 0, 25)
-    elseif first then
-        first.AnchorPoint = Vector2.new(0, 0)
-        first.Position = UDim2.new(0.5, -45, 0, 2)
-        first.Size = UDim2.new(0, 90, 0, 25)
-    end
+	group.AnchorPoint = Vector2.new(0, 0)
+	group.Position = UDim2.new(0, Theme.Metrics.Padding, 1, -(height + Theme.Metrics.Padding))
+	group.Size = UDim2.new(1, -(Theme.Metrics.Padding * 2), 0, height)
+
+	first.AnchorPoint = Vector2.new(0, 0)
+	first.Size = UDim2.new(0, width, 0, height)
+	first.Selectable = true
+
+	if second then
+		second.AnchorPoint = Vector2.new(0, 0)
+		second.Size = UDim2.new(0, width, 0, height)
+		second.Position = UDim2.new(0.5, gap / 2, 0, 0)
+		second.Selectable = true
+		first.Position = UDim2.new(0.5, -(width + gap / 2), 0, 0)
+	else
+		first.Position = UDim2.new(0.5, -(width / 2), 0, 0)
+	end
 end
 
-MessageType.OK = 1
-MessageType.OKCancel = 2
-MessageType.YesNo = 3
+local function resolveButtons(buttons, messageType)
+	if messageType == MessageType.OK then
+		return buttons.OK, buttons.OK and buttons.OK.OK, nil
+	elseif messageType == MessageType.OKCancel then
+		return buttons.OKCancel, buttons.OKCancel and buttons.OKCancel.OK, buttons.OKCancel and buttons.OKCancel.Cancel
+	elseif messageType == MessageType.YesNo then
+		return buttons.YesNo, buttons.YesNo and buttons.YesNo.Yes, buttons.YesNo and buttons.YesNo.No
+	end
+end
+
+local function calculateDialogSize(title, message)
+	local viewport = ControlUtil.GetViewportSize(Base)
+	local maximumWidth = math.max(240, math.min(560, viewport.X - Theme.Metrics.PopupMargin * 4))
+	local minimumWidth = math.min(340, maximumWidth)
+	local titleWidth = TextService:GetTextSize(title, TEXT_SIZE, Enum.Font.SourceSans, DYNAMIC_TEXT_BOUNDS).X
+	local bodyWidth = TextService:GetTextSize(message, TEXT_SIZE, Enum.Font.SourceSans, DYNAMIC_TEXT_BOUNDS).X
+	local width = math.max(minimumWidth, math.min(maximumWidth, math.max(titleWidth + 40, bodyWidth + 48)))
+	local bodyBounds = TextService:GetTextSize(
+		message,
+		TEXT_SIZE,
+		Enum.Font.SourceSans,
+		Vector2.new(math.max(1, width - 32), 100000)
+	)
+	local maximumHeight = math.max(160, viewport.Y - Theme.Metrics.PopupMargin * 4)
+	local height = math.max(150, math.min(maximumHeight, bodyBounds.Y + 104))
+
+	return math.floor(width + 0.5), math.floor(height + 0.5), bodyBounds.Y + 104 > maximumHeight
+end
+
+local function complete(callback)
+	MessageBox.Hide()
+	ControlUtil.RunCallback("Message box callback failed", callback)
+end
 
 function MessageBox.Show(title, message, messageType, firstCallback, secondCallback)
-    if firstClickEvent then
-        firstClickEvent:Disconnect()
-        
-        if secondClickEvent then
-            secondClickEvent:Disconnect()
-        end
-    end
-    
-    local first, second
-    local inner = Object.Inner
-    local buttons = inner.Buttons
+	title = tostring(title or "Hydroxide")
+	message = tostring(message or "")
+	messageType = messageType or MessageType.OK
 
-    hideButtonGroups(buttons)
+	disconnectButtons()
 
-    local titleWidth = TextService:GetTextSize(title, 18, "SourceSans", constants.dynamicWidth).X + 30
-    local bodyWidth = TextService:GetTextSize(message, 18, "SourceSans", constants.dynamicWidth).X + 40
-    local messageWidth = math.max(340, math.min(520, math.max(titleWidth, bodyWidth)))
+	local inner = Object:FindFirstChild("Inner")
+	local buttons = inner and inner:FindFirstChild("Buttons")
+	local messageLabel = inner and inner:FindFirstChild("Message")
+	local titleLabel = Object:FindFirstChild("Title")
+	assert(inner and buttons and messageLabel and titleLabel, "MessageBox asset is incomplete")
 
-    local messageHeight = TextService:GetTextSize(message, 18, "SourceSans", Vector2.new(messageWidth - 30, 133742069)).Y + 95
+	hideButtonGroups(buttons)
+	local group, first, second = resolveButtons(buttons, messageType)
 
-    if messageType == MessageType.OK then
-        selectedButtons = buttons.OK
-        first =  selectedButtons.OK
-    elseif messageType == MessageType.OKCancel then
-        selectedButtons = buttons.OKCancel
-        first = selectedButtons.OK
-        second = selectedButtons.Cancel
-    elseif messageType == MessageType.YesNo then
-        selectedButtons = buttons.YesNo
-        first = selectedButtons.Yes
-        second = selectedButtons.No
-    else
-        return
-    end
+	if not group or not first then
+		return false
+	end
 
-    Object.Title.Text = title
-    inner.Message.Text = message
+	local width, height, truncated = calculateDialogSize(title, message)
+	titleLabel.Text = title
+	messageLabel.Text = message
+	messageLabel.TextWrapped = true
+	messageLabel.TextTruncate = truncated and Enum.TextTruncate.AtEnd or Enum.TextTruncate.None
+	messageLabel.TextYAlignment = Enum.TextYAlignment.Top
 
-    Object.Size = UDim2.new(0, messageWidth, 0, messageHeight)
-    Object.Position = UDim2.new(0.5, -(messageWidth / 2), 0.5, -(messageHeight / 2))
+	Object.Size = UDim2.new(0, width, 0, height)
+	Object.Position = UDim2.new(0.5, -(width / 2), 0.5, -(height / 2))
+	layoutButtons(group, first, second)
 
-    firstClickEvent = first.MouseButton1Click:Connect(function()
-        if firstCallback then
-            firstCallback()
-        end
+	buttonConnections[#buttonConnections + 1] = ControlUtil.ConnectActivated(first, function()
+		complete(firstCallback)
+	end)
 
-        MessageBox.Hide()
-    end)
+	if second then
+		buttonConnections[#buttonConnections + 1] = ControlUtil.ConnectActivated(second, function()
+			complete(secondCallback)
+		end)
+	end
 
-    if second then
-        secondClickEvent = second.MouseButton1Click:Connect(function()
-            if secondCallback then
-                secondCallback()
-            end
+	activeDialog = {
+		First = first,
+		FirstCallback = firstCallback,
+		Second = second,
+		SecondCallback = secondCallback,
+	}
 
-            MessageBox.Hide()
-        end)
-    end
-
-    layoutButtons(selectedButtons, first, second)
-    selectedButtons.Visible = true
-    Shadow.Visible = true
-    Object.Visible = true
+	Theme.Apply(Object)
+	group.Visible = true
+	Shadow.Visible = true
+	Object.Visible = true
+	ControlUtil.SetSelectedObject(first)
+	return true
 end
 
 function MessageBox.Hide()
-    if firstClickEvent then
-        firstClickEvent:Disconnect()
-
-        if secondClickEvent then
-            secondClickEvent:Disconnect()
-        end
-    end
-
-    firstClickEvent = nil
-    secondClickEvent = nil
-
-    Shadow.Visible = false
-    Object.Visible = false
-
-    hideButtonGroups(Object.Inner.Buttons)
-    selectedButtons = nil
+	disconnectButtons()
+	activeDialog = nil
+	Shadow.Visible = false
+	Object.Visible = false
+	hideButtonGroups(Object.Inner.Buttons)
 end
+
+function MessageBox.IsVisible()
+	return activeDialog ~= nil and Object.Visible
+end
+
+ControlUtil.TrackConnection(UserInputService.InputBegan:Connect(function(input, processed)
+	if processed or not activeDialog then
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.Escape then
+		complete(activeDialog.SecondCallback)
+	elseif input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
+		complete(activeDialog.FirstCallback)
+	end
+end))
 
 return MessageBox, MessageType

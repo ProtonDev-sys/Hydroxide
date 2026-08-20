@@ -1,0 +1,35 @@
+name: Quality
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  lua-specs:
+    name: Lua specs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Lua 5.4
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes lua5.4
+
+      - name: Run specs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for spec in tests/*_spec.lua; do
+            echo "::group::$spec"
+            lua5.4 "$spec"
+            echo "::endgroup::"
+          done

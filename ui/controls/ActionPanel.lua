@@ -1,18 +1,14 @@
+local ControlUtil = import("ui/ControlUtil")
+local Theme = (oh and oh.Theme) or import("ui/Theme")
+
 local ActionPanel = {}
-local Theme = oh.Theme or import("ui/Theme")
 
 local DEFAULT_BUTTON_WIDTH = 96
-local DEFAULT_BUTTON_HEIGHT = 22
-local DEFAULT_GAP = 5
-local STATUS_HEIGHT = 20
-local ACTIONS_TOP = STATUS_HEIGHT + 4
+local DEFAULT_BUTTON_HEIGHT = Theme.Metrics.ControlHeight
+local DEFAULT_GAP = Theme.Metrics.Gap
+local STATUS_HEIGHT = Theme.Metrics.CompactControlHeight
+local ACTIONS_TOP = STATUS_HEIGHT + Theme.Metrics.Gap
 local MINIMUM_RESULTS_HEIGHT = 72
-
-local function trackConnection(connection)
-	if oh and oh.Events then
-		oh.Events[#oh.Events + 1] = connection
-	end
-end
 
 local function findTemplate(container)
 	return container:FindFirstChild("Clear")
@@ -54,7 +50,7 @@ local function makeStatus(toolbar)
 	status.Size = UDim2.new(1, -4, 0, STATUS_HEIGHT)
 	status.Text = "Select a captured call to inspect"
 	status.TextColor3 = Theme.Colors.TextMuted
-	status.TextSize = 15
+	status.TextSize = Theme.Typography.SmallTextSize
 	status.TextTruncate = Enum.TextTruncate.AtEnd
 	status.TextXAlignment = Enum.TextXAlignment.Left
 	status.ZIndex = toolbar.ZIndex + 1
@@ -69,12 +65,13 @@ local function configureButton(button, toolbar, action, width, height)
 	button.Size = UDim2.new(0, action.Width or width, 0, height)
 	button.Visible = true
 	button.ClipsDescendants = true
+	button.Selectable = true
 	button.ZIndex = toolbar.ZIndex + 1
 
 	local icon = button:FindFirstChild("Icon", true)
 	local label = button:FindFirstChild("Label", true)
 
-	if icon then
+	if icon and (icon:IsA("ImageLabel") or icon:IsA("ImageButton")) then
 		icon.ZIndex = button.ZIndex + 1
 
 		if action.Icon then
@@ -82,23 +79,24 @@ local function configureButton(button, toolbar, action, width, height)
 
 			local border = icon:FindFirstChild("Border")
 
-			if border and border:IsA("ImageLabel") then
+			if border and (border:IsA("ImageLabel") or border:IsA("ImageButton")) then
 				border.Image = action.Icon
 				border.ZIndex = icon.ZIndex
 			end
 		end
 	end
 
-	if label then
+	if label and (label:IsA("TextLabel") or label:IsA("TextButton")) then
 		label.Text = action.Label or action.Name
 		label.TextTruncate = Enum.TextTruncate.AtEnd
 		label.ZIndex = button.ZIndex + 1
 	end
+
+	Theme.Apply(button)
 end
 
 function ActionPanel.Install(container, results, options)
 	options = type(options) == "table" and options or {}
-
 	local actions = options.Actions or {}
 
 	if not container or not results or #actions == 0 then
@@ -107,13 +105,16 @@ function ActionPanel.Install(container, results, options)
 
 	local template = findTemplate(container)
 
-	if not template then
+	if not template or not template:IsA("GuiButton") then
 		return nil
 	end
 
 	local maximumColumns = math.max(1, math.floor(tonumber(options.Columns) or 5))
 	local buttonWidth = math.max(72, math.floor(tonumber(options.ButtonWidth) or DEFAULT_BUTTON_WIDTH))
-	local buttonHeight = math.max(20, math.floor(tonumber(options.ButtonHeight) or DEFAULT_BUTTON_HEIGHT))
+	local buttonHeight = math.max(
+		Theme.Metrics.MinimumHitSize,
+		math.floor(tonumber(options.ButtonHeight) or DEFAULT_BUTTON_HEIGHT)
+	)
 	local gap = math.max(2, math.floor(tonumber(options.Gap) or DEFAULT_GAP))
 	local minimumCellWidth = math.max(72, math.floor(tonumber(options.MinimumCellWidth) or buttonWidth))
 	local originalResultsPosition = results.Position
@@ -136,9 +137,9 @@ function ActionPanel.Install(container, results, options)
 	actionsFrame.MidImage = ""
 	actionsFrame.Position = UDim2.new(0, 0, 0, ACTIONS_TOP)
 	actionsFrame.ScrollBarImageColor3 = Theme.Colors.Scrollbar
-	actionsFrame.ScrollBarThickness = 4
+	actionsFrame.ScrollBarThickness = Theme.Metrics.ScrollbarThickness
 	actionsFrame.ScrollingDirection = Enum.ScrollingDirection.Y
-	actionsFrame.Size = UDim2.new(1, 0, 0, buttonHeight + 5)
+	actionsFrame.Size = UDim2.new(1, 0, 0, buttonHeight + gap)
 	actionsFrame.TopImage = ""
 	actionsFrame.ZIndex = toolbar.ZIndex + 1
 	actionsFrame.Parent = toolbar
@@ -152,11 +153,20 @@ function ActionPanel.Install(container, results, options)
 	layout.StartCorner = Enum.StartCorner.TopLeft
 	layout.Parent = actionsFrame
 
+	local panel = {
+		Buttons = {},
+		Connections = {},
+		Enabled = {},
+		Status = makeStatus(toolbar),
+		Toolbar = toolbar,
+	}
+
 	local layoutQueued = false
 	local layoutRunning = false
+	local destroyed = false
 
 	local function updateLayout()
-		if layoutRunning or not toolbar.Parent or not results.Parent then
+		if destroyed or layoutRunning or not toolbar.Parent or not results.Parent then
 			return
 		end
 
@@ -171,9 +181,9 @@ function ActionPanel.Install(container, results, options)
 			local cellWidth = math.max(1, math.floor((layoutWidth - gap * (columns - 1)) / columns))
 			local rows = math.ceil(#actions / columns)
 			local contentHeight = rows * buttonHeight + math.max(0, rows - 1) * gap
-			local desiredToolbarHeight = ACTIONS_TOP + contentHeight + 7
+			local desiredToolbarHeight = ACTIONS_TOP + contentHeight + gap
 			local originalResultsHeight = originalResultsSize.Y.Scale * parentHeight + originalResultsSize.Y.Offset
-			local minimumToolbarHeight = ACTIONS_TOP + buttonHeight + 7
+			local minimumToolbarHeight = ACTIONS_TOP + buttonHeight + gap
 			local reservedResultsHeight =
 				math.min(MINIMUM_RESULTS_HEIGHT, math.max(0, math.floor(originalResultsHeight - minimumToolbarHeight)))
 			local maximumToolbarHeight = math.max(0, math.floor(originalResultsHeight - reservedResultsHeight))
@@ -186,11 +196,13 @@ function ActionPanel.Install(container, results, options)
 			toolbar.Size = UDim2.new(originalResultsSize.X.Scale, originalResultsSize.X.Offset, 0, toolbarHeight)
 			actionsFrame.Size = UDim2.new(1, 0, 0, actionHeight)
 			actionsFrame.CanvasSize = UDim2.new(0, width, 0, contentHeight)
-			actionsFrame.ScrollBarThickness = contentHeight > actionHeight and 4 or 0
+			actionsFrame.ScrollBarThickness =
+				contentHeight > actionHeight and Theme.Metrics.ScrollbarThickness or 0
 			results.Position = originalResultsPosition + UDim2.new(0, 0, 0, toolbarHeight)
 			results.Size = originalResultsSize - UDim2.new(0, 0, 0, toolbarHeight)
 
 			local maximumScroll = math.max(0, contentHeight - actionHeight)
+
 			if actionsFrame.CanvasPosition.Y > maximumScroll then
 				actionsFrame.CanvasPosition = Vector2.new(0, maximumScroll)
 			end
@@ -200,7 +212,7 @@ function ActionPanel.Install(container, results, options)
 	end
 
 	local function queueLayout()
-		if layoutQueued then
+		if destroyed or layoutQueued then
 			return
 		end
 
@@ -211,34 +223,29 @@ function ActionPanel.Install(container, results, options)
 		end)
 	end
 
-	trackConnection(actionsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayout))
-	trackConnection(toolbar.Parent:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayout))
-	task.defer(updateLayout)
-
-	local panel = {
-		Buttons = {},
-		Enabled = {},
-		Status = makeStatus(toolbar),
-		Toolbar = toolbar,
-	}
+	panel.Connections[#panel.Connections + 1] =
+		ControlUtil.TrackConnection(actionsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayout))
+	panel.Connections[#panel.Connections + 1] =
+		ControlUtil.TrackConnection(toolbar.Parent:GetPropertyChangedSignal("AbsoluteSize"):Connect(queueLayout))
 
 	for index, action in ipairs(actions) do
 		local button = template:Clone()
 		button.LayoutOrder = index
 		button.Parent = actionsFrame
-
 		configureButton(button, toolbar, action, buttonWidth, buttonHeight)
 
 		panel.Enabled[action.Name] = false
+
 		if type(action.Callback) == "function" then
-			trackConnection(button.MouseButton1Click:Connect(function()
+			panel.Connections[#panel.Connections + 1] = ControlUtil.ConnectActivated(button, function()
 				if panel.Enabled[action.Name] then
-					action.Callback()
+					ControlUtil.RunCallback("Action panel callback failed", action.Callback)
 				end
-			end))
+			end)
 		end
 
 		panel.Buttons[action.Name] = button
+		ControlUtil.SetButtonEnabled(button, false)
 	end
 
 	function panel:SetStatus(primary, secondary)
@@ -255,30 +262,41 @@ function ActionPanel.Install(container, results, options)
 		local button = self.Buttons[name]
 
 		if not button then
-			return
+			return false
 		end
 
 		enabled = enabled == true
-		button.Active = enabled
-		button.AutoButtonColor = enabled
 		self.Enabled[name] = enabled
-
-		if button:IsA("ImageButton") then
-			button.ImageTransparency = enabled and 0 or 0.45
-		end
-
-		local label = button:FindFirstChild("Label", true)
-		local icon = button:FindFirstChild("Icon", true)
-
-		if label then
-			label.TextTransparency = enabled and 0 or 0.45
-		end
-
-		if icon then
-			icon.ImageTransparency = enabled and 0 or 0.45
-		end
+		ControlUtil.SetButtonEnabled(button, enabled)
+		return true
 	end
 
+	function panel:Destroy()
+		if destroyed then
+			return
+		end
+
+		destroyed = true
+		ControlUtil.DisconnectAll(self.Connections)
+		self.Connections = {}
+
+		if results and results.Parent then
+			results.Position = originalResultsPosition
+			results.Size = originalResultsSize
+		end
+
+		if toolbar and toolbar.Parent then
+			toolbar:Destroy()
+		end
+
+		self.Buttons = {}
+		self.Enabled = {}
+		self.Status = nil
+		self.Toolbar = nil
+	end
+
+	Theme.Apply(toolbar)
+	task.defer(updateLayout)
 	return panel
 end
 
