@@ -23,11 +23,30 @@ local Colors = {
 	CodeBackground = Color3.fromRGB(11, 12, 14),
 }
 
+Colors.Focus = Colors.Accent
 Colors.ResizeGrip = Colors.TextMuted
 
 local Theme = {
 	Colors = Colors,
 	CornerRadius = 4,
+	Metrics = {
+		CompactControlHeight = 24,
+		ControlHeight = 28,
+		Gap = 6,
+		MinimumHitSize = 28,
+		Padding = 8,
+		PopupMargin = 8,
+		ScrollbarThickness = 6,
+	},
+	Motion = {
+		Fast = 0.1,
+		Normal = 0.15,
+	},
+	Typography = {
+		BodyTextSize = 17,
+		CodeTextSize = 14,
+		SmallTextSize = 15,
+	},
 }
 
 local function channel(value)
@@ -117,8 +136,13 @@ function Theme.ResolveColor(color, role)
 	local token = legacyTokens[key] or canonicalTokens[key]
 
 	if role == "Border" and token then
-		if token == "Accent" or token == "Danger" or token == "Warning" or token == "Send" or token == "Receive" then
-			return Colors[token]
+		if key == colorKey(Colors.Accent)
+			or key == colorKey(Colors.Danger)
+			or key == colorKey(Colors.Warning)
+			or key == colorKey(Colors.Send)
+			or key == colorKey(Colors.Receive)
+		then
+			return canonicalColors[key]
 		end
 
 		return Colors.Border
@@ -147,12 +171,20 @@ function Theme.ApplyObject(object)
 			object.TextStrokeColor3 = Theme.ResolveColor(object.TextStrokeColor3)
 		end
 
+		if object:IsA("GuiButton") then
+			object.Selectable = true
+		end
+
 		if object:IsA("ImageLabel") or object:IsA("ImageButton") then
 			object.ImageColor3 = Theme.ResolveColor(object.ImageColor3)
 		end
 
 		if object:IsA("ScrollingFrame") then
 			object.ScrollBarImageColor3 = Theme.ResolveColor(object.ScrollBarImageColor3)
+
+			if object.ScrollBarThickness > 0 then
+				object.ScrollBarThickness = math.max(Theme.Metrics.ScrollbarThickness, object.ScrollBarThickness)
+			end
 		end
 
 		if object:IsA("UIStroke") then

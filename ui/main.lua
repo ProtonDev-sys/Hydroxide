@@ -1,6 +1,6 @@
 local CoreGui = game:GetService("CoreGui")
-local UserInput = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
 
 local Interface = import("rbxassetid://11389137937")
 
@@ -10,7 +10,9 @@ end
 
 local Layout = import("ui/Layout")
 local Theme = import("ui/Theme")
+oh.Theme = Theme
 
+local ControlUtil = import("ui/ControlUtil")
 local Base = Interface.Base
 local Open = Interface.Open
 local Drag = Base.Drag
@@ -30,13 +32,33 @@ local function getViewport()
 	return viewport
 end
 
+local function parentInterface()
+	local methods = (oh and oh.Methods) or {}
+	local getHiddenUi = methods.gethui or methods.getHui
+
+	if type(getHiddenUi) == "function" then
+		local ok, parent = pcall(getHiddenUi)
+
+		if ok and typeof(parent) == "Instance" then
+			Interface.Parent = parent
+			return
+		end
+	end
+
+	if syn and type(syn.protect_gui) == "function" then
+		pcall(syn.protect_gui, Interface)
+	end
+
+	Interface.Parent = CoreGui
+end
+
 local initialViewport = getViewport()
 local baseWidth, baseHeight = Layout.GetDefaultSize(initialViewport.X, initialViewport.Y)
 local baseX, baseY = Layout.GetCenteredPosition(initialViewport.X, initialViewport.Y, baseWidth, baseHeight)
+baseX, baseY = Layout.ClampPosition(initialViewport.X, initialViewport.Y, baseWidth, baseHeight, baseX, baseY)
 
-oh.Theme = Theme
 Theme.Apply(Interface)
-oh.Events.Theme = Interface.DescendantAdded:Connect(Theme.ApplyObject)
+oh.Events.Theme = ControlUtil.TrackConnection(Interface.DescendantAdded:Connect(Theme.ApplyObject))
 
 Base.Size = UDim2.new(0, baseWidth, 0, baseHeight)
 Base.Position = UDim2.new(0, baseX, 0, baseY)
@@ -49,7 +71,7 @@ end
 Open.Position = UDim2.new(0.5, -15, 0, -75)
 
 function oh.setStatus(text)
-	Status.Text = "• Status: " .. text
+	Status.Text = "• Status: " .. tostring(text or "")
 end
 
 function oh.getStatus()
@@ -58,23 +80,14 @@ end
 
 oh.setStatus("Starting capture backends ...")
 Interface.Name = HttpService:GenerateGUID(false)
-
-if getHui then
-	Interface.Parent = getHui()
-else
-	if syn then
-		syn.protect_gui(Interface)
-	end
-
-	Interface.Parent = CoreGui
-end
+parentInterface()
 
 -- Install traffic hooks before downloading the larger scanner/detail UI so
 -- calls made during a cold first load are not silently missed.
 for _, backend in ipairs({ "modules/RemoteSpy", "modules/RakNetSpy" }) do
 	local loaded, loadError = pcall(import, backend)
 
-	if not loaded and warn then
+	if not loaded and type(warn) == "function" then
 		warn(("Hydroxide %s could not start early: %s"):format(backend, tostring(loadError)))
 	end
 end
@@ -84,6 +97,7 @@ local initialized, initializationError = xpcall(function()
 
 	if prefetch then
 		local prefetched, prefetchErrors = prefetch({
+			"ui/ControlUtil",
 			"ui/controls/TabSelector",
 			"ui/controls/MessageBox",
 			"ui/controls/Prompt",
@@ -117,7 +131,7 @@ local initialized, initializationError = xpcall(function()
 			"methods/scriptbuilder",
 		})
 
-		if not prefetched and warn then
+		if not prefetched and type(warn) == "function" then
 			warn("Hydroxide prefetch completed with errors:\n" .. table.concat(prefetchErrors, "\n"))
 		end
 	end
@@ -135,7 +149,7 @@ local initialized, initializationError = xpcall(function()
 		import("ui/modules/RakNetSpy")
 	end)
 
-	if not rakNetLoaded and warn then
+	if not rakNetLoaded and type(warn) == "function" then
 		warn("Hydroxide RakNet Spy could not be initialized; core tools remain available:\n" .. tostring(rakNetError))
 	end
 
@@ -151,10 +165,13 @@ local initialized, initializationError = xpcall(function()
 	local relativeWindowSize = Vector2.new(1, 1)
 	local lastViewport = initialViewport
 	local viewportConnection
+	local lastTitleTapAt = 0
+	local lastTitleTapPosition
+	local DOUBLE_TAP_WINDOW = 0.35
+	local DOUBLE_TAP_DISTANCE = 12
 
 	local function trackConnection(connection)
-		oh.Events[#oh.Events + 1] = connection
-		return connection
+		return ControlUtil.TrackConnection(connection)
 	end
 
 	local function cancelGesture()
@@ -177,6 +194,18 @@ local initialized, initializationError = xpcall(function()
 		Base.Size = UDim2.new(0, windowSize.X, 0, windowSize.Y)
 		Base.Position = menuOpen and constants.opened or constants.closed
 		Open.Position = menuOpen and constants.conceal or constants.reveal
+	end
+
+	local function clampWindowPosition(viewport)
+		local x, y = Layout.ClampPosition(
+			viewport.X,
+			viewport.Y,
+			windowSize.X,
+			windowSize.Y,
+			windowPosition.X,
+			windowPosition.Y
+		)
+		windowPosition = Vector2.new(x, y)
 	end
 
 	local function fitWindowToViewport()
@@ -204,8 +233,24 @@ local initialized, initializationError = xpcall(function()
 		end
 
 		windowSize = Vector2.new(width, height)
+		clampWindowPosition(viewport)
 		applyWindowLayout()
 	end
+
+	local function resetWindow()
+		cancelGesture()
+		local viewport = getViewport()
+		local width, height = Layout.GetDefaultSize(viewport.X, viewport.Y)
+		local x, y = Layout.GetCenteredPosition(viewport.X, viewport.Y, width, height)
+		x, y = Layout.ClampPosition(viewport.X, viewport.Y, width, height, x, y)
+		windowPosition = Vector2.new(x, y)
+		windowSize = Vector2.new(width, height)
+		relativeWindowSize = Vector2.new(1, 1)
+		lastViewport = viewport
+		applyWindowLayout()
+	end
+
+	oh.resetWindow = resetWindow
 
 	local resizeHandle = Base:FindFirstChild("HydroxideResizeHandle")
 
@@ -218,7 +263,7 @@ local initialized, initializationError = xpcall(function()
 		resizeHandle.BackgroundTransparency = 1
 		resizeHandle.BorderSizePixel = 0
 		resizeHandle.Position = UDim2.new(1, -2, 1, -2)
-		resizeHandle.Size = UDim2.new(0, 20, 0, 20)
+		resizeHandle.Size = UDim2.new(0, Theme.Metrics.MinimumHitSize, 0, Theme.Metrics.MinimumHitSize)
 		resizeHandle.Text = ""
 		resizeHandle.ZIndex = 1000
 		resizeHandle.Parent = Base
@@ -230,7 +275,7 @@ local initialized, initializationError = xpcall(function()
 			grip.BackgroundColor3 = Theme.Colors.ResizeGrip
 			grip.BackgroundTransparency = 0.15
 			grip.BorderSizePixel = 0
-			grip.Position = UDim2.new(1, -2, 1, -(index * 4 - 1))
+			grip.Position = UDim2.new(1, -3, 1, -(index * 4))
 			grip.Rotation = -45
 			grip.Size = UDim2.new(0, index * 4 + 2, 0, 1)
 			grip.ZIndex = resizeHandle.ZIndex + 1
@@ -239,13 +284,7 @@ local initialized, initializationError = xpcall(function()
 	end
 
 	local function beginGesture(kind, input)
-		local inputType = input.UserInputType
-
-		if
-			activeGesture
-			or not menuOpen
-			or (inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch)
-		then
+		if activeGesture or not menuOpen or not ControlUtil.IsPrimaryPointer(input) then
 			return
 		end
 
@@ -274,12 +313,20 @@ local initialized, initializationError = xpcall(function()
 		local delta = input.Position - gestureStart
 		local viewport = getViewport()
 
+		if delta.Magnitude > 8 then
+			lastTitleTapAt = 0
+		end
+
 		if activeGesture == "move" then
 			local positionX, positionY = Layout.GetDraggedPosition(
 				gestureStartPosition.X,
 				gestureStartPosition.Y,
 				delta.X,
-				delta.Y
+				delta.Y,
+				viewport.X,
+				viewport.Y,
+				windowSize.X,
+				windowSize.Y
 			)
 			windowPosition = Vector2.new(positionX, positionY)
 		elseif activeGesture == "resize" then
@@ -290,6 +337,7 @@ local initialized, initializationError = xpcall(function()
 				gestureStartSize.Y + delta.Y
 			)
 			windowSize = Vector2.new(width, height)
+			clampWindowPosition(viewport)
 
 			local defaultWidth, defaultHeight = Layout.GetDefaultSize(viewport.X, viewport.Y)
 			relativeWindowSize = Vector2.new(width / defaultWidth, height / defaultHeight)
@@ -333,33 +381,68 @@ local initialized, initializationError = xpcall(function()
 		updateLayout()
 	end
 
+	local function tweenPosition(object, target)
+		local duration = ControlUtil.MotionDuration(Theme.Motion.Normal)
+
+		if duration <= 0 then
+			object.Position = target
+		else
+			object:TweenPosition(target, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, duration, true)
+		end
+	end
+
 	trackConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindViewport))
 	bindViewport()
 
 	Drag.Active = true
 	trackConnection(Drag.InputBegan:Connect(function(input)
+		if ControlUtil.IsPrimaryPointer(input) then
+			local now = os.clock()
+			local point = Vector2.new(input.Position.X, input.Position.Y)
+
+			if ControlUtil.ContainsPoint(Collapse, point) then
+				return
+			end
+
+			if lastTitleTapPosition
+				and now - lastTitleTapAt <= DOUBLE_TAP_WINDOW
+				and (point - lastTitleTapPosition).Magnitude <= DOUBLE_TAP_DISTANCE
+			then
+				lastTitleTapAt = 0
+				lastTitleTapPosition = nil
+				resetWindow()
+				return
+			end
+
+			lastTitleTapAt = now
+			lastTitleTapPosition = point
+		end
+
 		beginGesture("move", input)
 	end))
 	trackConnection(resizeHandle.InputBegan:Connect(function(input)
 		beginGesture("resize", input)
 	end))
-	oh.Events.Drag = UserInput.InputChanged:Connect(updateGesture)
-	trackConnection(UserInput.InputEnded:Connect(finishGesture))
-	trackConnection(UserInput.WindowFocusReleased:Connect(cancelGesture))
+	oh.Events.Drag = trackConnection(UserInputService.InputChanged:Connect(updateGesture))
+	trackConnection(UserInputService.InputEnded:Connect(finishGesture))
+	trackConnection(UserInputService.WindowFocusReleased:Connect(cancelGesture))
 
-	trackConnection(Open.MouseButton1Click:Connect(function()
+	ControlUtil.ConnectActivated(Open, function()
 		cancelGesture()
 		menuOpen = true
-		Open:TweenPosition(constants.conceal, "Out", "Quad", 0.15, true)
-		Base:TweenPosition(constants.opened, "Out", "Quad", 0.15, true)
-	end))
+		clampWindowPosition(getViewport())
+		updateConstants()
+		tweenPosition(Open, constants.conceal)
+		tweenPosition(Base, constants.opened)
+	end)
 
-	trackConnection(Collapse.MouseButton1Click:Connect(function()
+	ControlUtil.ConnectActivated(Collapse, function()
 		cancelGesture()
 		menuOpen = false
-		Base:TweenPosition(constants.closed, "Out", "Quad", 0.15, true)
-		Open:TweenPosition(constants.reveal, "Out", "Quad", 0.15, true)
-	end))
+		updateConstants()
+		tweenPosition(Base, constants.closed)
+		tweenPosition(Open, constants.reveal)
+	end)
 
 	oh.setStatus("Ready")
 end, function(err)
@@ -377,7 +460,7 @@ if not initialized then
 			.. initializationError
 	end
 
-	if warn then
+	if type(warn) == "function" then
 		warn(message)
 	end
 
