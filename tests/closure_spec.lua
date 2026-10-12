@@ -1,6 +1,10 @@
 local root = (arg and arg[0] and arg[0]:match("^(.*[/\\])tests[/\\][^/\\]+$")) or ""
 assert(root, "unable to locate repository root")
 
+_G.import = function(path)
+    return dofile(root .. path .. ".lua")
+end
+
 local function assertEqual(actual, expected, label)
     if actual ~= expected then
         error(("%s: expected %s, got %s"):format(label, tostring(expected), tostring(actual)), 2)
@@ -443,5 +447,20 @@ oh.Settings.MaxClosureHistoryBytes = savedClosureHistoryBytes
 oh.Settings.MaxRemoteHistoryBytes = savedRemoteHistoryBytes
 oh.Settings.MaxClosureLogs = savedClosureLogs
 oh.Settings.CaptureCallStacks = savedCaptureCallStacks
+
+local replacementHook = assert(ClosureSpy.Hook.new(closure))
+assertEqual(hook:Remove(), true, "repeated old hook removal remains idempotent")
+assertEqual(ClosureSpy.CurrentClosures[target], replacementHook, "old removal does not erase a replacement hook")
+replacementHook.Blocked = true
+local capturedRuntime = oh
+capturedRuntime.Exited = true
+_G.oh = { Hooks = {}, Events = {}, Settings = {} }
+local beforeExitCapture = ClosureSpy.Diagnostics.CallsCaptured
+local exitFirst, exitNil, exitCount = wrappers[target]("after-exit", nil, "tail")
+assertEqual(exitFirst, "result", "late closure calls pass through after exit")
+assertEqual(exitNil, nil, "late closure calls preserve nil returns")
+assertEqual(exitCount, 3, "late closure calls preserve the return tuple")
+assertEqual(ClosureSpy.Diagnostics.CallsCaptured, beforeExitCapture, "late closure calls do not enter a replacement runtime")
+assertEqual(replacementHook:Remove(), true, "replacement hook cleanup remains available")
 
 print("closure_spec.lua: ok")

@@ -119,11 +119,16 @@ local legacyTokens = {
 
 local canonicalColors = {}
 local canonicalTokens = {}
+local accentBorders = {}
 
 for token, color in pairs(Colors) do
 	local key = colorKey(color)
 	canonicalColors[key] = color
 	canonicalTokens[key] = token
+end
+
+for _, token in ipairs({ "Accent", "Danger", "Warning", "Send", "Receive" }) do
+	accentBorders[colorKey(Colors[token])] = true
 end
 
 function Theme.ResolveColor(color, role)
@@ -136,12 +141,7 @@ function Theme.ResolveColor(color, role)
 	local token = legacyTokens[key] or canonicalTokens[key]
 
 	if role == "Border" and token then
-		if key == colorKey(Colors.Accent)
-			or key == colorKey(Colors.Danger)
-			or key == colorKey(Colors.Warning)
-			or key == colorKey(Colors.Send)
-			or key == colorKey(Colors.Receive)
-		then
+		if accentBorders[key] then
 			return canonicalColors[key]
 		end
 
@@ -169,10 +169,6 @@ function Theme.ApplyObject(object)
 		if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
 			object.TextColor3 = Theme.ResolveColor(object.TextColor3)
 			object.TextStrokeColor3 = Theme.ResolveColor(object.TextStrokeColor3)
-		end
-
-		if object:IsA("GuiButton") then
-			object.Selectable = true
 		end
 
 		if object:IsA("ImageLabel") or object:IsA("ImageButton") then

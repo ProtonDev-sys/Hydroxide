@@ -33,7 +33,7 @@ function bufferLibrary.tostring(value)
 end
 
 function bufferLibrary.len(value)
-	return #bufferLibrary.tostring(value)
+	return value.declaredLength or #bufferLibrary.tostring(value)
 end
 
 function bufferLibrary.readu8(value, offset)
@@ -110,11 +110,16 @@ local function install(settings)
 	local removedSend = {}
 	local removedReceive = {}
 	local sent = {}
+	local failures = {}
 
 	_G.raknetAddSendHook = function(callback)
 		sendHooks[#sendHooks + 1] = callback
 	end
 	_G.raknetRemoveSendHook = function(callback)
+		if failures.SendRemoval then
+			failures.SendRemoval = false
+			error("send removal failed")
+		end
 		removedSend[#removedSend + 1] = callback
 	end
 	_G.raknetAddReceiveHook = function(callback)
@@ -142,29 +147,40 @@ local function install(settings)
 			RemovedReceive = removedReceive,
 			Sent = sent,
 			Events = _G.oh.Events,
+			Failures = failures,
 		}
 end
 
-local defaultSpy, defaultHarness = install({
+local unlimitedSpy, unlimitedHarness = install({
 	MaxRakNetLogs = 0,
 	MaxRakNetPacketBytes = 32,
 	MaxRakNetHistoryBytes = 0,
 })
 
 for index = 1, 525 do
-	defaultHarness.SendHooks[1](makePacket("D", { PacketId = index % 3 }))
+	unlimitedHarness.SendHooks[1](makePacket("D", { PacketId = index % 3 }))
 end
 
-assertEqual(#defaultSpy.Logs, 525, "default history has no implicit count eviction")
-assertEqual(defaultSpy.Retention.MaxLogs, nil, "default count retention is Clear-only")
-assertEqual(defaultSpy.Retention.MaxHistoryBytes, nil, "default byte retention is Clear-only")
-assertEqual(defaultSpy.Diagnostics.LogsDropped, 0, "default retention drops no captures")
-assertEqual(#defaultSpy.SendLogs, 525, "all-send index retains complete default history")
-assertEqual(#defaultSpy.ReceiveLogs, 0, "all-receive index remains direction-specific")
-local defaultGroup = defaultSpy.PacketGroups[defaultSpy.PacketIdKey(1)]
-assertEqual(defaultGroup.Count, 175, "packet-ID index is updated incrementally")
-assertEqual(#defaultGroup.Logs, 175, "packet-ID log index retains every matching capture")
-assertEqual(#defaultGroup.SendLogs, 175, "packet-ID direction index retains matching sends")
+assertEqual(#unlimitedSpy.Logs, 525, "explicit zero history has no implicit count eviction")
+assertEqual(unlimitedSpy.Retention.MaxLogs, nil, "explicit zero count retention is Clear-only")
+assertEqual(unlimitedSpy.Retention.MaxHistoryBytes, nil, "explicit zero byte retention is Clear-only")
+assertEqual(unlimitedSpy.Diagnostics.LogsDropped, 0, "explicit zero retention drops no captures")
+assertEqual(#unlimitedSpy.SendLogs, 525, "all-send index retains complete unlimited history")
+assertEqual(#unlimitedSpy.ReceiveLogs, 0, "all-receive index remains direction-specific")
+local unlimitedGroup = unlimitedSpy.PacketGroups[unlimitedSpy.PacketIdKey(1)]
+assertEqual(unlimitedGroup.Count, 175, "packet-ID index is updated incrementally")
+assertEqual(#unlimitedGroup.Logs, 175, "packet-ID log index retains every matching capture")
+assertEqual(#unlimitedGroup.SendLogs, 175, "packet-ID direction index retains matching sends")
+
+local defaultSpy, defaultHarness = install({})
+for index = 1, 501 do
+    defaultHarness.SendHooks[1](makePacket("D"))
+end
+assertEqual(defaultSpy.Retention.MaxLogs, 500, "omitted retention uses a bounded count default")
+assertEqual(defaultSpy.Retention.MaxHistoryBytes, 16777216, "omitted retention uses a bounded byte default")
+assertEqual(#defaultSpy.Logs, 500, "default capture history evicts at the count limit")
+assertEqual(defaultSpy.Diagnostics.LogsDropped, 1, "default eviction is diagnosed")
+defaultSpy.Disconnect()
 
 local spy, harness = install({
 	MaxRakNetLogs = 2,
@@ -301,6 +317,9 @@ harness.SendHooks[1](makePacket("PA"))
 assertEqual(#spy.Logs, 2, "paused spy does not retain packets")
 assertEqual(spy.Diagnostics.PacketsSkippedPaused, 1, "paused callback diagnosed")
 spy.Resume()
+assertEqual(spy:SetEnabled(false), false, "colon pause preserves the requested false value")
+assertEqual(spy.Enabled, false, "colon pause disables capture")
+assertEqual(spy:SetEnabled(true), true, "colon resume restores capture")
 
 eventConnection:Disconnect()
 spy.Clear()
@@ -514,7 +533,39 @@ assertEqual(#stressGroup.ReceiveLogs, 1, "packet-ID receive index survives compa
 assertEqual(stressSpy.Diagnostics.LogsDropped, 2497, "stress eviction count remains exact")
 assertEqual(stressSpy.Diagnostics.HistoryCompactions > 0, true, "capped history periodically repacks tombstones")
 
-defaultSpy.Disconnect()
+local retrySpy, retryHarness = install({})
+retryHarness.Failures.SendRemoval = true
+local removed, removalError = retrySpy:Disconnect()
+assertEqual(removed, false, "failed hook removal is reported")
+assertContains(removalError, "send removal failed", "hook removal failure details preserved")
+assertEqual(retrySpy.Enabled, false, "teardown stops capture even when hook removal fails")
+assertEqual(retrySpy.Capabilities.SendHookInstalled, true, "failed removal remains pending for retry")
+local resumed, resumeError = retrySpy:Resume()
+assertEqual(resumed, false, "disconnected capture cannot be reenabled")
+assertContains(resumeError, "disconnected", "disconnected resume has a useful error")
+retryHarness.SendHooks[1](makePacket("late"))
+assertEqual(#retrySpy.Logs, 0, "late callbacks after teardown retain no packets")
+assertEqual(retrySpy:Disconnect(), true, "a second teardown retries failed removal")
+assertEqual(#retryHarness.RemovedSend, 1, "retry removes the exact send callback once")
+assertEqual(#retryHarness.RemovedReceive, 1, "retry does not repeat successful receive removal")
+assertEqual(retrySpy:ConnectEvent(function() end).Connected, false, "closed spy does not retain new listeners")
+
+local invalidSpy, invalidHarness = install({})
+local mismatchedBuffer = { __type = "buffer", bytes = "ABC", declaredLength = 4 }
+invalidHarness.SendHooks[1](makePacket("ABC", { AsBuffer = mismatchedBuffer, AsString = {}, AsArray = { "invalid" } }))
+local invalidEntry = invalidSpy.Logs[1]
+assertEqual(invalidEntry.PayloadComplete, false, "mismatched buffer lengths cannot become complete payloads")
+assertContains(invalidEntry.FieldErrors.AsBuffer, "length did not match", "mismatched buffer copy is diagnosed")
+for _, priority in ipairs({ 0 / 0, math.huge, 1.5 }) do
+    invalidHarness.SendHooks[1](makePacket("metadata", { Priority = priority }))
+    local metadataEntry = invalidSpy.Logs[#invalidSpy.Logs]
+    assertEqual(metadataEntry.Replayable, false, "send metadata must be finite integers")
+    assertEqual(invalidSpy:BuildScript(metadataEntry), nil, "invalid metadata cannot generate send code")
+    assertEqual(invalidSpy:Replay(metadataEntry), false, "invalid metadata cannot reach raknet.send")
+end
+invalidSpy:Disconnect()
+
+unlimitedSpy.Disconnect()
 byteSpy.Disconnect()
 listenerSpy.Disconnect()
 budgetSpy.Disconnect()

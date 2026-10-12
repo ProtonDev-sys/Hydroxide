@@ -7,7 +7,8 @@ local visualStates = setmetatable({}, { __mode = "k" })
 
 local function warnFailure(context, message)
 	if type(warn) == "function" then
-		warn(("[Hydroxide] %s: %s"):format(context, tostring(message)))
+		local ok, text = pcall(tostring, message)
+		warn(("[Hydroxide] %s: %s"):format(context, ok and text or "<unprintable error>"))
 	end
 end
 
@@ -56,6 +57,32 @@ function ControlUtil.RunCallback(context, callback, ...)
 	return ok, result
 end
 
+function ControlUtil.RenderRows(list, rows, createRow, isCurrent, batchSize)
+	batchSize = math.max(1, math.floor(tonumber(batchSize) or 32))
+
+	for first = 1, #rows, batchSize do
+		if not isCurrent() then
+			return true, true
+		end
+
+		list:BeginBatch()
+		local ok, err = pcall(function()
+			for index = first, math.min(#rows, first + batchSize - 1) do
+				createRow(rows[index])
+			end
+		end)
+		list:EndBatch()
+
+		if not ok then
+			return false, err
+		elseif first + batchSize <= #rows then
+			task.wait()
+		end
+	end
+
+	return true, false
+end
+
 function ControlUtil.ConnectActivated(button, callback)
 	assert(button and button:IsA("GuiButton"), "ConnectActivated expects a GuiButton")
 	button.Active = true
@@ -70,7 +97,13 @@ function ControlUtil.ConnectActivated(button, callback)
 		signal = button.MouseButton1Click
 	end
 
-	return ControlUtil.TrackConnection(signal:Connect(callback))
+	-- The GUI owns this signal and disconnects it when destroyed. Keeping each
+	-- transient row/action in the runtime registry retains every removed row.
+	return signal:Connect(function(...)
+		if button.Active then
+			ControlUtil.RunCallback("Button callback failed", callback, ...)
+		end
+	end)
 end
 
 function ControlUtil.ConnectSecondary(button, callback)
@@ -87,7 +120,11 @@ function ControlUtil.ConnectSecondary(button, callback)
 		signal = button.MouseButton2Click
 	end
 
-	return ControlUtil.TrackConnection(signal:Connect(callback))
+	return signal:Connect(function(...)
+		if button.Active then
+			ControlUtil.RunCallback("Secondary button callback failed", callback, ...)
+		end
+	end)
 end
 
 function ControlUtil.IsPrimaryPointer(input)

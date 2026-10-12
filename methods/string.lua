@@ -1,37 +1,15 @@
 local methods = {}
 
+local escapes = {
+    ['"'] = '\\"', ['\\'] = '\\\\',
+    ['\a'] = '\\a', ['\b'] = '\\b', ['\t'] = '\\t', ['\n'] = '\\n',
+    ['\v'] = '\\v', ['\f'] = '\\f', ['\r'] = '\\r'
+}
+
 local function escapeString(value)
-    local parts = {}
-
-    for index = 1, #value do
-        local byte = value:byte(index)
-
-        if byte == 34 then
-            parts[#parts + 1] = '\\"'
-        elseif byte == 92 then
-            parts[#parts + 1] = "\\\\"
-        elseif byte == 7 then
-            parts[#parts + 1] = "\\a"
-        elseif byte == 8 then
-            parts[#parts + 1] = "\\b"
-        elseif byte == 9 then
-            parts[#parts + 1] = "\\t"
-        elseif byte == 10 then
-            parts[#parts + 1] = "\\n"
-        elseif byte == 11 then
-            parts[#parts + 1] = "\\v"
-        elseif byte == 12 then
-            parts[#parts + 1] = "\\f"
-        elseif byte == 13 then
-            parts[#parts + 1] = "\\r"
-        elseif byte < 32 or byte > 126 then
-            parts[#parts + 1] = ("\\%03d"):format(byte)
-        else
-            parts[#parts + 1] = string.char(byte)
-        end
-    end
-
-    return table.concat(parts)
+    return (value:gsub('[%z\1-\31\127-\255"\\]', function(character)
+        return escapes[character] or ("\\%03d"):format(character:byte())
+    end))
 end
 
 local function numberToString(value)
@@ -68,7 +46,7 @@ local function toString(value)
         return "buffer"
     elseif rawType == "function" then
         local ran, info = pcall(getInfo, value, "n")
-        local closureName = ran and info and info.name or ""
+        local closureName = ran and type(info) == "table" and type(info.name) == "string" and info.name or ""
         return (closureName == "" and "Unnamed function") or closureName
     elseif rawType == "userdata" or valueType ~= rawType then
         return userdataValue(value)
@@ -92,6 +70,11 @@ local function dataToString(data)
     local valueType = typeof(data)
 
     if rawType == "string" then
+        local settings = oh and oh.Settings or {}
+        local maximum = tonumber(settings.MaxGeneratedStringBytes or settings.maxGeneratedStringBytes) or 65536
+        if maximum ~= maximum or maximum == math.huge or maximum == -math.huge then maximum = 65536 end
+        maximum = math.max(256, math.min(1048576, math.floor(maximum)))
+        if #data > maximum then return "nil --[[ string exceeds configured byte limit ]]" end
         return '"' .. escapeString(data) .. '"'
     elseif rawType == "table" or valueType == "table" then
         return tableToString(data)
@@ -109,17 +92,18 @@ local function dataToString(data)
         return tostring(data)
     end
 
-    return toString(data)
+    return "nil --[[ unsupported " .. rawType .. " value ]]"
 end
 
 local function summarizeValue(value, maxLength)
     local settings = oh and oh.Settings or {}
-    local limit = tonumber(maxLength) or settings.MaxArgumentPreviewLength or 240
+    local limit = tonumber(maxLength) or tonumber(settings.MaxArgumentPreviewLength) or 240
     local rawType = type(value)
     local valueType = typeof(value)
     local summary
 
-    limit = math.max(40, math.floor(limit))
+    if limit ~= limit or limit == math.huge or limit == -math.huge then limit = 240 end
+    limit = math.max(40, math.min(65536, math.floor(limit)))
 
     if rawType == "string" then
         summary = '"' .. escapeString(truncate(value, limit - 2)) .. '"'
@@ -149,7 +133,8 @@ local function summarizeValue(value, maxLength)
             return buffer.len(value)
         end)
 
-        summary = measured and ("buffer (%d bytes)"):format(size) or "buffer"
+        summary = measured and type(size) == "number" and size == size and size >= 0 and size < math.huge
+            and ("buffer (%d bytes)"):format(math.floor(size)) or "buffer"
     elseif rawType == "function" then
         local described, description = pcall(toString, value)
         summary = described and ("function %s"):format(description) or "function"

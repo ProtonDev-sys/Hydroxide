@@ -3,39 +3,20 @@ local methods = {}
 local players = game:GetService("Players")
 local client = players and players.LocalPlayer
 
+local escapes = {
+    ['"'] = '\\"', ['\\'] = '\\\\',
+    ['\a'] = '\\a', ['\b'] = '\\b', ['\t'] = '\\t', ['\n'] = '\\n',
+    ['\v'] = '\\v', ['\f'] = '\\f', ['\r'] = '\\r'
+}
+
+local function escapeString(value)
+    return (value:gsub('[%z\1-\31\127-\255"\\]', function(character)
+        return escapes[character] or ("\\%03d"):format(character:byte())
+    end))
+end
+
 local function quoteString(value)
-    local parts = { '"' }
-
-    for index = 1, #value do
-        local byte = value:byte(index)
-
-        if byte == 34 then
-            parts[#parts + 1] = '\\"'
-        elseif byte == 92 then
-            parts[#parts + 1] = "\\\\"
-        elseif byte == 7 then
-            parts[#parts + 1] = "\\a"
-        elseif byte == 8 then
-            parts[#parts + 1] = "\\b"
-        elseif byte == 9 then
-            parts[#parts + 1] = "\\t"
-        elseif byte == 10 then
-            parts[#parts + 1] = "\\n"
-        elseif byte == 11 then
-            parts[#parts + 1] = "\\v"
-        elseif byte == 12 then
-            parts[#parts + 1] = "\\f"
-        elseif byte == 13 then
-            parts[#parts + 1] = "\\r"
-        elseif byte < 32 or byte > 126 then
-            parts[#parts + 1] = ("\\%03d"):format(byte)
-        else
-            parts[#parts + 1] = string.char(byte)
-        end
-    end
-
-    parts[#parts + 1] = '"'
-    return table.concat(parts)
+    return '"' .. escapeString(value) .. '"'
 end
 
 local function joinValues(values)
@@ -120,8 +101,12 @@ local function bufferValue(data)
     local measured, byteLength = pcall(buffer.len, data)
     local settings = oh and oh.Settings or {}
     local maximum = tonumber(settings.MaxGeneratedBufferBytes or settings.maxGeneratedBufferBytes) or 65536
+    if maximum ~= maximum or maximum == math.huge or maximum == -math.huge then maximum = 65536 end
+    maximum = math.max(0, math.min(1048576, math.floor(maximum)))
 
-    if not measured or type(byteLength) ~= "number" then
+    if not measured or type(byteLength) ~= "number" or byteLength ~= byteLength
+        or byteLength < 0 or byteLength == math.huge or byteLength % 1 ~= 0
+    then
         return "nil --[[ unreadable buffer ]]"
     elseif byteLength > maximum then
         return "nil --[[ buffer exceeds configured byte limit ]]"
@@ -156,7 +141,7 @@ local function userdataValue(data)
     elseif dataType == "Instance" then
         return getInstancePath(data)
     elseif dataType == "BrickColor" then
-        return dataType .. '.new("' .. tostring(data) .. '")'
+        return dataType .. '.new(' .. quoteString(tostring(data)) .. ')'
     elseif dataType == "NumberRange" then
         return ("NumberRange.new(%s, %s)"):format(tostring(data.Min), tostring(data.Max))
     elseif dataType == "DateTime" then

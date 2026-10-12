@@ -104,4 +104,81 @@ FunctionInspector.DescribeFunction(cachedFunctions[1], {
 })
 assertEqual(decompileCalls, callsBeforeCacheFill + 66, "function inspector evicts its oldest bounded cache entry")
 
+_G.isLClosure = function() return false end
+_G.isXClosure = function() return false end
+local cFunction = FunctionInspector.DescribeFunction(function() end, { IncludeSource = false })
+assert(cFunction:find("Closure type: C", 1, true), "false closure predicate still identifies C functions")
+assert(cFunction:find("Origin: game", 1, true), "false executor predicate still identifies game functions")
+
+local largeValues = {}
+for index = 1, 100 do
+	largeValues[index] = string.rep("value", 80)
+end
+_G.getConstants = function() return largeValues end
+
+for _, maximum in ipairs({ 1, 32, 256, 1024, 4096 }) do
+	local description = FunctionInspector.DescribeFunction(function() end, {
+		IncludeSource = false,
+		MaxValues = 100,
+		MaxOutputBytes = maximum,
+	})
+	assert(#description <= maximum, "function output including truncation marker obeys an explicit byte budget")
+end
+
+local visitedFrames = 0
+local stack = {}
+for index = 1, 1000 do
+	stack[index] = setmetatable({}, {
+		__index = function(_, key)
+			visitedFrames = visitedFrames + 1
+			if key == "name" then return "frame" end
+			if key == "source" then return "@source.lua" end
+		end,
+	})
+end
+local stackOutput = FunctionInspector.DescribeStack(stack, { MaxOutputBytes = 512 })
+assert(#stackOutput <= 512, "stack output obeys an explicit byte budget")
+assert(visitedFrames < 200, "stack summary stops visiting frames once the output is full")
+
+local function cacheBudget(name)
+	local budget = { Released = 0, Reserved = 0 }
+	function budget:Reserve()
+		self.Reserved = self.Reserved + 1
+		return { Owner = name }
+	end
+	function budget:Release(token)
+		assertEqual(token.Owner, name, "source cache token is released to its original budget")
+		self.Released = self.Released + 1
+	end
+	return budget
+end
+local firstBudget, nextBudget = cacheBudget("first"), cacheBudget("next")
+_G.oh = { Settings = { MaxFunctionSourceCacheEntries = 1 }, FunctionSourceCache = firstBudget }
+_G.getConstants = function() return {} end
+local scopedInspector = dofile(root .. "ui/controls/FunctionInspector.lua")
+scopedInspector.DescribeFunction(function() end, { MaxSourceBytes = 1024 })
+_G.oh.FunctionSourceCache = nextBudget
+scopedInspector.DescribeFunction(function() end, { MaxSourceBytes = 1024 })
+assertEqual(firstBudget.Released, 1, "changing the runtime budget does not leak old source reservations")
+assertEqual(nextBudget.Released, 0, "old source entries never release a new runtime's budget tokens")
+
+local exitedBudget, replacementBudget = cacheBudget("exited"), cacheBudget("replacement")
+local owner = { Settings = {}, FunctionSourceCache = exitedBudget }
+local environment = setmetatable({ oh = owner }, { __index = _G })
+local exitingInspector = assert(loadfile(root .. "ui/controls/FunctionInspector.lua", "t", environment))()
+local exitDecompileCalls = 0
+_G.decompile = function()
+	exitDecompileCalls = exitDecompileCalls + 1
+	owner.Exited = true
+	_G.oh = { Settings = {}, FunctionSourceCache = replacementBudget }
+	return "-- late source from the previous runtime"
+end
+local lateDescription = exitingInspector.DescribeFunction(function() end)
+assert(not sourceFrom(lateDescription), "inspection finishing after shutdown cannot publish late source")
+assertEqual(exitedBudget.Reserved, 0, "shutdown prevents late source from repopulating its cleared cache budget")
+assertEqual(replacementBudget.Reserved, 0, "late source never reserves a replacement runtime's cache budget")
+assertEqual(exitingInspector.DescribeFunction(function() end), "Function inspection was cancelled.",
+	"an inspector belonging to an exited runtime remains cancelled after replacement")
+assertEqual(exitDecompileCalls, 1, "an exited inspector never starts another decompile")
+
 print("function_inspector_spec.lua: ok")

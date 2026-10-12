@@ -1,10 +1,8 @@
 # Hydroxide
 <i>Lua runtime introspection and network-capture tooling for games on the Roblox engine.</i>
 
-This fork consolidates the Potassium modernization, responsive shared theme, bounded inspectors,
-and the new RemoteSpy-style RakNet workflow on `main`.
-
-Report issues in [ProtonDev-sys/Hydroxide](https://github.com/ProtonDev-sys/Hydroxide/issues).
+This fork keeps the upstream Hydroxide interface and adds Potassium support, bounded inspectors,
+and a shared RemoteSpy/RakNet workflow on `main`.
 
 <p align="center">
     <img src="https://cdn.discordapp.com/attachments/633472429917995038/722143730500501534/Hydroxide_Logo.png"/>
@@ -13,123 +11,68 @@ Report issues in [ProtonDev-sys/Hydroxide](https://github.com/ProtonDev-sys/Hydr
 </p>
 
 ## Quick start
+
+Run this in Potassium:
+
 ```lua
-local owner = "ProtonDev-sys"
-local repository = "Hydroxide"
-local branch = "main"
-
-getgenv().HydroxideConfig = {
-    owner = owner,
-    repository = repository,
-    branch = branch,
-    captureExecutorCalls = true,
-    captureCallStacks = true,
-    maxRemoteLogs = 500,
-    maxClosureLogs = 500,
-    maxRenderedLogs = 100,
-    maxStackFrames = 24,
-    maxStackCapturesPerSecond = 60,
-    maxArgumentPreviewLength = 240,
-    maxHexBytes = 512,
-    maxGeneratedTableEntries = 256,
-    maxGeneratedTables = 512,
-    maxGeneratedTableDepth = 16,
-    maxGeneratedStringBytes = 65536,
-    maxGeneratedBufferBytes = 65536,
-    maxGeneratedOutputBytes = 1048576,
-    maxValueViewDepth = 8,
-    maxValueViewEntries = 512,
-    maxValueViewTableEntries = 256,
-    maxValueViewBytes = 65536,
-    maxInspectorBytes = 524288,
-    maxFunctionSourceCacheEntries = 64,
-    maxFunctionSourceCacheBytes = 2097152,
-    maxConditionBufferBytes = 4096,
-    maxCapturedCallBytes = 262144,
-    maxCapturedArguments = 128,
-    maxRemoteHistoryBytes = 16777216,
-    maxClosureHistoryBytes = 16777216,
-    maxScriptRows = 750,
-    maxModuleRows = 750,
-    maxModuleFunctions = 32,
-    maxRakNetLogs = 0, -- keep captures until Clear; use a positive value to cap history
-    maxRenderedRakNetLogs = 100,
-    maxRakNetPacketBytes = 65536,
-    maxRakNetHistoryBytes = 0, -- keep captures until Clear; individual packets remain bounded
-    maxRakNetGeneratedOutputBytes = 1048576,
-    maxConcurrentImports = 6
-}
-
-local baseUrl = ("https://raw.githubusercontent.com/%s/%s/%s/"):format(owner, repository, branch)
-
-local function fetch(url)
-    if type(request) == "function" then
-        local ok, response = pcall(request, { Url = url, Method = "GET" })
-
-        if ok and response and type(response.Body) == "string"
-            and (response.Success or (response.StatusCode and response.StatusCode >= 200 and response.StatusCode < 300))
-        then
-            return response.Body
-        end
-    end
-
-    if type(httpget) == "function" then
-        local ok, source = pcall(httpget, url)
-
-        if ok and type(source) == "string" then
-            return source
-        end
-    end
-
-    local ok, source = pcall(function()
-        return game:HttpGet(url)
-    end)
-
-    if ok and type(source) == "string" then
-        return source
-    end
-
-    ok, source = pcall(function()
-        return game:HttpGetAsync(url)
-    end)
-    assert(ok and type(source) == "string", "Hydroxide could not download " .. url)
-    return source
-end
-
-local function webImport(file)
-    local source = fetch(baseUrl .. file .. ".lua")
-    local chunk, compileError = loadstring(source, file .. ".lua")
-
-    assert(chunk, compileError)
-    return chunk()
-end
-
-webImport("init")
-getgenv().import("ui/main")
+assert(loadstring(httpget("https://raw.githubusercontent.com/ProtonDev-sys/Hydroxide/main/init.lua"), "Hydroxide"))()
 ```
+
+The initializer opens the interface and supplies the defaults. Existing scripts that call
+`getgenv().import("ui/main")` afterwards continue to work without opening a second interface.
+
+Only set options you want to change, before the launch line:
+
+```lua
+getgenv().HydroxideConfig = {
+    maxRenderedLogs = 75,
+    captureCallStacks = false,
+}
+```
+
+See [configuration](docs/CONFIGURATION.md) for every option, commit pinning, local development,
+and programmatic startup. No configuration block is required for normal use.
 
 ## Potassium compatibility
 
-This fork targets the current [Potassium API reference](https://docs.potassium.pro/) and keeps legacy aliases only as fallbacks. The runtime uses Potassium's documented APIs directly:
+The compatibility table in `init.lua` resolves documented Potassium APIs once and keeps legacy
+aliases at the boundary. Optional capabilities are checked before use. See
+[runtime and UI compatibility](docs/COMPATIBILITY.md) for the API references and maintenance rules.
 
-* `filtergc` narrows scanner work to non-executor Lua closures instead of walking every GC object.
-* `getrunningscripts` powers Script Scanner for running `LocalScript` and client-context `Script` instances without a GC scan.
-* `getscriptclosure` and `getsenv` provide the same lazy closure, environment, proto, constant, function, and source inspection for both running scripts and loaded modules.
-* `hookmetamethod` captures ordinary namecalls on their original thread for caller filtering and stack/source inspection. Potassium's `oth.hook`, `oth.get_root_callback`, `oth.get_original_thread`, and `oth.unhook(target)` provide the direct C-function pass-through, with `hookfunction` retained as a fallback.
-* `getscriptfromthread` preserves calling-script attribution for off-thread hooks.
-* `raknet.add_send_hook`, `raknet.add_receive_hook`, their matching remove functions, and `raknet.send` power a new RemoteSpy-style RakNet transport view, with per-packet capture and UI-render limits when RakNet is enabled in Potassium's own settings. It is built from the same list, log, and action-panel components rather than embedding the previous RakNet panel. The shared workflow can ignore, block, inspect, generate code for, copy, and replay supported packet captures without enabling RakNet automatically.
-* `debug.getcallstack` captures bounded call stacks for remote and closure calls when the active hook runs on the original thread.
-* `decompile` powers lazy script, module, and function source inspection without slowing initial UI loading.
-* `restorefunction` and documented `Connection:Enable()` teardown restore hooks and temporarily disabled error connections.
-* `getthreadidentity` and `setthreadidentity` capture the launch identity and restore it around privileged inspection work, replacing legacy thread-context names internally.
+- `filtergc` narrows closure scans; `getrunningscripts` and `getloadedmodules` enumerate script views.
+- `getscriptclosure`, `getsenv`, debug APIs, and `decompile` supply lazy script/function inspection.
+- Existing remote and closure hooks preserve original returns and errors when capture fails,
+  and are restored on exit. Call stack snapshots have a separate rate limit.
+- Potassium's RakNet callbacks supply the packet view when enabled in Potassium's settings.
+  Hydroxide does not enable that setting automatically.
+- Source imports resolve one commit. Persistent cache entries include owner, repository, and
+  commit, and are verified against GitHub blob hashes using `crypt.hash`. Corrupt entries are
+  downloaded again. If the trusted file list or hashing is unavailable, imports bypass disk
+  cache and use the resolved HTTPS source. An unresolved branch stops startup.
 
-Remote and closure histories use fixed-capacity circular buffers plus aggregate per-call and per-tool byte budgets, so many individually valid buffers cannot exhaust memory. Visible call rows are rendered newest-first in a smaller window to keep high-traffic sessions responsive. The list follows new calls only while it is pinned to the top, so manual inspection does not get pulled away. Every matching call is still counted and logged into that bounded history, while expensive stack snapshots use a token-bucket limit (`maxStackCapturesPerSecond`, default 60) so remote spam cannot stall the client; calls skipped by that safeguard are labelled in the inspector. RakNet snapshots are retained until **Clear** by default and only a bounded visible window is rendered; set a positive `maxRakNetLogs` or `maxRakNetHistoryBytes` to opt into eviction. Imported source is cached by the resolved branch commit, preventing stale or partially mixed module versions. The main Hydroxide window opens immediately at a compact viewport-relative size, scales when the viewport changes, can be dragged beyond the screen bounds, and can be resized. Asset-backed and dynamically created controls share one centralized dark theme. RemoteSpy/ClosureSpy call logs expose responsive icon action strips for arguments, returns, cleaned call chains, caller and target functions, decompiled scripts, paths, replay code, confirmed replay calls, diagnostics, and string/buffer hex previews. Inspector output is read-only and opens inside the Hydroxide menu instead of modal source popups; its split can be resized for long function data, and very large output is capped by `MaxInspectorBytes` (default 512 KB). Script and Module scanners wait until their tab is first opened, then use matching icon-based detail navigation, full-width detail views, cancellable row batches, bounded background workers, and no hidden-tab scan or metadata work. Function-source caches have aggregate entry and byte eviction limits. Module sections expose source, environment, functions, protos, constants, per-function metadata/source, and an Enter-to-apply filter for reaching relevant entries without rendering an unbounded list. Set `getgenv().HydroxideConfig.cache = false` to disable the persistent cache, `captureExecutorCalls = false` to hide RemoteSpy calls unless they are confirmed to come from a game thread, or `suppressScriptErrors = false` to leave `ScriptContext.Error` connections untouched.
+## Working with captures
 
-Click a captured RemoteSpy or ClosureSpy call to enable the inspector actions; right-click still opens the same actions as a shortcut. Argument and return viewers expand nested table contents with stable ordering, shared/cyclic reference labels, and configurable depth, entry, and byte limits. RemoteSpy replay generation opens a read-only code viewer, while **Copy Code** copies the generated source. It preserves packed nils, shared and cyclic tables, binary strings and buffers, non-finite numbers, and safe Instance paths; values that cannot be reconstructed are explicitly marked and replay is disabled instead of emitting misleading code. Every generated RemoteSpy and RakNet script is compiled before it is shown or copied. Generation is bounded by the table, depth, string, buffer, and output limits above. Live replay uses an in-menu confirmation, and an intentionally blocked remote or packet ID must be unblocked first. Conditions default to the selected argument and a safe type match, include buffer/current Roblox value types, validate indices, and retain an advanced typed-value option.
+Remote and closure histories use bounded circular buffers with per-history byte accounting.
+RakNet defaults to 500 snapshots and 16 MiB of payload history; explicit zero limits retain
+snapshots until **Clear**. The UI renders a smaller newest-first window and follows new calls
+only while pinned to the top. These limits bound retained payloads and visible rows, not every
+Lua/Roblox allocation in the client. See [configuration](docs/CONFIGURATION.md) for their scope.
 
-Upvalue Scanner's **Generate Script** action opens a validated, read-only fork-only script instead of silently copying a fragile snippet. The generated script uses the current Potassium debug aliases, verifies the closure and table target before mutation, and refuses identity-based table/function/thread keys that cannot be replayed safely.
+Select a RemoteSpy or ClosureSpy call to inspect arguments, returns, caller/target functions,
+call chains, source, paths, diagnostics, replay code, and bounded hex previews. Right-click
+provides the same actions. Nested value views identify shared/cyclic references and preserve
+packed nils and false values. Large output is capped and shown in a read-only in-menu viewer.
 
-The loader defaults to `ProtonDev-sys/Hydroxide` on `main`. Override `owner`, `repository`, or `branch` in `HydroxideConfig` when testing another fork or commit.
+Generated replay scripts preserve supported Instances, shared/cyclic tables, binary strings,
+buffers, non-finite numbers, and nil argument positions. Unsupported or truncated captures
+are labelled and cannot be replayed. RemoteSpy and RakNet output is compiled before display
+or copying. Replay requires an in-menu confirmation and respects blocked remote/packet IDs.
+Conditions support argument indices, type matching, typed values, buffers, and nil/false values.
+
+The upstream asset-based window keeps its compact dark UI, resizable layout, viewport recovery,
+and shared controls. Scanners defer work until their tab is opened, render in cancellable
+batches, and use bounded source caches. Function inspection stops when dismissed or superseded.
+`ScriptContext.Error` connections are left untouched by default.
 
 ## Features
 * Upvalue Scanner
@@ -153,7 +96,7 @@ The loader defaults to `ProtonDev-sys/Hydroxide` on `main`. Override `owner`, `r
     * Ignore/Block calls based on parameters passed
     * Traceback calling function/closure
 * RakNet Spy (Potassium)
-    * Retain outgoing and incoming packet snapshots until Clear without retaining live packet objects
+    * Retain bounded outgoing and incoming packet snapshots without holding live packet objects; optional zero limits retain them until Clear
     * Browse packet-ID groups with counts and ignore, block, unblock, or clear filters for individual packet IDs
     * Inspect packet metadata plus capped hex, text, and array payload views
     * Generate compile-validated outgoing send scripts and clearly labelled incoming receive-hook templates
@@ -163,7 +106,25 @@ The loader defaults to `ProtonDev-sys/Hydroxide` on `main`. Override `owner`, `r
     * View general information of closures (location, protos, constants, etc.)
     * Inspect call chains, caller source, calling scripts, and nested caller functions from the logs pane
 
-More to come, soon.
+## Maintenance and validation
+
+Common log storage, argument filters, value snapshots, script models, scanner iteration, and
+inspector formatting live in shared modules. Repeated execution restores the prior session's
+owned globals and resources; failed initialization cleans up partial state. Scanners yield in
+bounded batches and stop when their view closes or a newer search replaces them.
+
+Run the regression suites with Lua 5.4 from the repository root:
+
+```sh
+for spec in tests/*_spec.lua; do lua5.4 "$spec" || exit 1; done
+```
+
+The suites execute the real modules with mocked Roblox/Potassium boundaries, including
+initializer failures, cache integrity, concurrent imports, packed nil/false values, history
+limits, replay generation, scanner cancellation, UI control cleanup, and source cache ownership.
+Live Roblox rendering and executor behavior still need an in-client smoke test; command-line
+checks do not establish frame rates or compatibility with a particular running game.
+
 
 ## Images/Videos
 <p align="center">

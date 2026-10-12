@@ -3,11 +3,20 @@ local sourceCache = setmetatable({}, { __mode = "k" })
 local sourceCacheOrder = {}
 local sourceCacheBytes = 0
 
+local function numberLimit(value, fallback, minimum, maximum)
+	value = tonumber(value)
+
+	if not value or value ~= value or math.abs(value) == math.huge then
+		value = fallback
+	end
+
+	return math.max(minimum, math.min(maximum, math.floor(value)))
+end
+
 local function sourceCacheLimits()
 	local settings = oh and oh.Settings or {}
-	local entries = tonumber(settings.MaxFunctionSourceCacheEntries or settings.maxFunctionSourceCacheEntries) or 64
-	local bytes = tonumber(settings.MaxFunctionSourceCacheBytes or settings.maxFunctionSourceCacheBytes) or 2097152
-	return math.max(1, math.min(256, math.floor(entries))), math.max(32768, math.min(16777216, math.floor(bytes)))
+	return numberLimit(settings.MaxFunctionSourceCacheEntries or settings.maxFunctionSourceCacheEntries, 64, 1, 256),
+		numberLimit(settings.MaxFunctionSourceCacheBytes or settings.maxFunctionSourceCacheBytes, 2097152, 32768, 16777216)
 end
 
 local function sourceCacheEntryBytes(entry)
@@ -40,7 +49,7 @@ local function removeCachedSource(func, expected, releaseBudget)
 	end
 
 	if releaseBudget and cached.BudgetToken then
-		local budget = sharedSourceCacheBudget()
+		local budget = cached.Budget
 
 		if budget then
 			budget:Release(cached.BudgetToken, false)
@@ -48,6 +57,7 @@ local function removeCachedSource(func, expected, releaseBudget)
 	end
 
 	cached.BudgetToken = nil
+	cached.Budget = nil
 end
 
 local function cacheSource(func, entry)
@@ -67,8 +77,13 @@ local function cacheSource(func, entry)
 	local budget = sharedSourceCacheBudget()
 
 	if budget then
+		local references = setmetatable({ func, entry }, { __mode = "v" })
 		local token = budget:Reserve(entryBytes, function()
-			removeCachedSource(func, entry, false)
+			local target, cached = references[1], references[2]
+
+			if target and cached then
+				removeCachedSource(target, cached, false)
+			end
 		end)
 
 		if not token then
@@ -76,6 +91,7 @@ local function cacheSource(func, entry)
 		end
 
 		entry.BudgetToken = token
+		entry.Budget = budget
 	end
 
 	sourceCache[func] = entry
@@ -140,20 +156,26 @@ local function defaultSummary(value)
 end
 
 local function appendBounded(lines, state, line)
-	line = tostring(line or "")
-
-	if state.Bytes + #line + 1 > state.MaxBytes then
-		if not state.Truncated then
-			state.Truncated = true
-			lines[#lines + 1] = "... inspector output truncated by the configured safety limit ..."
-		end
-
+	if state.Truncated then
 		return false
 	end
 
-	state.Bytes = state.Bytes + #line + 1
-	lines[#lines + 1] = line
-	return true
+	line = safeTostring(line or "")
+	local separator = #lines > 0 and 1 or 0
+	local remaining = state.MaxBytes - state.Bytes - separator
+
+	if #line > remaining then
+		state.Truncated = true
+		local marker = "... inspector output truncated by the configured safety limit ..."
+		line = marker:sub(1, math.max(0, remaining))
+	end
+
+	if remaining >= 0 then
+		state.Bytes = state.Bytes + #line + separator
+		lines[#lines + 1] = line
+	end
+
+	return not state.Truncated
 end
 
 local function sortedEntries(values, limit)
@@ -221,10 +243,17 @@ local function callBoolean(method, func)
 	end
 
 	local ran, result = pcall(method, func)
-	return ran and type(result) == "boolean" and result or nil
+
+	if ran and type(result) == "boolean" then
+		return result
+	end
 end
 
 local function inspectionIsActive(options)
+	if oh and oh.Exited then
+		return false
+	end
+
 	if type(options.IsAlive) ~= "function" then
 		return true
 	end
@@ -245,7 +274,7 @@ end
 local function functionSource(func, options)
 	local decompiler = options.Decompile or decompile
 	local cacheAllowed = options.CacheSource ~= false and options.Decompile == nil
-	local sourceLimit = math.max(1024, math.floor(tonumber(options.MaxSourceBytes) or 32768))
+	local sourceLimit = numberLimit(options.MaxSourceBytes, 32768, 1024, 8388608)
 
 	if options.IncludeSource == false then
 		return nil, "skipped by the inspection work budget"
@@ -278,6 +307,7 @@ local function functionSource(func, options)
 
 	local complete
 	source, complete = boundSource(source, sourceLimit)
+	sourceError = sourceError and boundedText(sourceError, 4096) or nil
 
 	if not inspectionIsActive(options) then
 		return nil, "inspection was cancelled"
@@ -302,14 +332,14 @@ local function describeFunctionInto(lines, state, func, options)
 
 	local summarize = options.Summarize or defaultSummary
 	local getPath = options.GetPath
-	local maxValues = math.max(1, math.floor(tonumber(options.MaxValues) or 32))
+	local maxValues = numberLimit(options.MaxValues, 32, 1, 1000)
 	local infoRan, info = pcall(getInfo, func)
 
 	info = infoRan and type(info) == "table" and info or nil
 	appendBounded(lines, state, "Function: " .. safeTostring(func))
-	appendBounded(lines, state, "Name: " .. tostring(info and info.name or "anonymous"))
-	appendBounded(lines, state, "Kind: " .. tostring(info and info.what or "unknown"))
-	appendBounded(lines, state, "Source: " .. tostring(info and (info.short_src or info.source) or "unknown"))
+	appendBounded(lines, state, "Name: " .. boundedText(info and info.name or "anonymous", 1024))
+	appendBounded(lines, state, "Kind: " .. boundedText(info and info.what or "unknown", 120))
+	appendBounded(lines, state, "Source: " .. boundedText(info and (info.short_src or info.source) or "unknown", 4096))
 	appendBounded(lines, state, "Defined: " .. tostring(info and info.linedefined or "unknown"))
 	appendBounded(lines, state, "Current line: " .. tostring(info and info.currentline or "unknown"))
 	appendBounded(lines, state, "Declared upvalues: " .. tostring(info and info.nups or "unknown"))
@@ -460,7 +490,7 @@ function FunctionInspector.DescribeFunction(func, options)
 	local lines = {}
 	local state = {
 		Bytes = 0,
-		MaxBytes = math.max(8192, math.floor(tonumber(options.MaxOutputBytes) or 131072)),
+		MaxBytes = numberLimit(options.MaxOutputBytes, 131072, 1, 8388608),
 		Truncated = false,
 	}
 
@@ -482,17 +512,21 @@ function FunctionInspector.DescribeStack(stack, options)
 	local lines = {}
 	local state = {
 		Bytes = 0,
-		MaxBytes = math.max(16384, math.floor(tonumber(options.MaxOutputBytes) or 262144)),
+		MaxBytes = numberLimit(options.MaxOutputBytes, 262144, 1, 8388608),
 		Truncated = false,
 	}
-	local maxDetailedFrames = math.max(1, math.floor(tonumber(options.MaxDetailedFrames) or 8))
-	local maxDecompiledFrames = math.max(0, math.floor(tonumber(options.MaxDecompiledFrames) or 3))
+	local maxDetailedFrames = numberLimit(options.MaxDetailedFrames, 8, 1, 64)
+	local maxDecompiledFrames = numberLimit(options.MaxDecompiledFrames, 3, 0, maxDetailedFrames)
 
 	appendBounded(lines, state, ("FUNCTION CALL CHAIN (%d frames)"):format(#stack))
 	appendBounded(lines, state, "Order: closest to the intercepted call -> outermost caller")
 	appendBounded(lines, state, "")
 
 	for index, frame in ipairs(stack) do
+		if state.Truncated or not inspectionIsActive(options) then
+			break
+		end
+
 		frame = type(frame) == "table" and frame or {}
 		local name = frame.name or frame.Name or "anonymous"
 		local source = frame.shortSource or frame.short_src or frame.source or frame.Source or "unknown"
@@ -503,8 +537,8 @@ function FunctionInspector.DescribeStack(stack, options)
 			state,
 			("%02d  %s  %s:%s%s"):format(
 				index,
-				tostring(name),
-				tostring(source):gsub("^[@=]", ""),
+				boundedText(name, 1024),
+				boundedText(source, 4096):gsub("^[@=]", ""),
 				line and math.floor(line) or "?",
 				type(func) == "function" and ("  [" .. safeTostring(func) .. "]") or ""
 			)
@@ -540,11 +574,11 @@ function FunctionInspector.DescribeStack(stack, options)
 		local name = frame.name or frame.Name or "anonymous"
 		local source = frame.shortSource or frame.short_src or frame.source or frame.Source or "unknown"
 		local line = tonumber(frame.line or frame.currentline or frame.Line)
-		appendBounded(lines, state, ("[%02d] %s"):format(index, tostring(name)))
+		appendBounded(lines, state, ("[%02d] %s"):format(index, boundedText(name, 1024)))
 		appendBounded(
 			lines,
 			state,
-			("Callsite: %s:%s"):format(tostring(source):gsub("^[@=]", ""), line and math.floor(line) or "?")
+			("Callsite: %s:%s"):format(boundedText(source, 4096):gsub("^[@=]", ""), line and math.floor(line) or "?")
 		)
 
 		if type(func) == "function" then

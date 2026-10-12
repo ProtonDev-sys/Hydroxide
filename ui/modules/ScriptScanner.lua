@@ -1,3 +1,5 @@
+local ControlUtil = import("ui/ControlUtil")
+local InspectUtil = import("ui/InspectUtil")
 local TextService = game:GetService("TextService")
 local TweenService = game:GetService("TweenService")
 
@@ -980,66 +982,22 @@ end
 
 -- UI Functionality
 
-local function rowComesBefore(left, right)
-	if left.Sort == right.Sort then
-		return left.Stable < right.Stable
-	end
-
-	return left.Sort < right.Sort
-end
+local rowComesBefore = InspectUtil.RowComesBefore
 
 local function addBoundedRow(rows, row)
-	if #rows < constants.maxScriptRows then
-		rows[#rows + 1] = row
-		local child = #rows
-
-		while child > 1 do
-			local parent = math.floor(child / 2)
-
-			if not rowComesBefore(rows[parent], rows[child]) then
-				break
-			end
-
-			rows[parent], rows[child] = rows[child], rows[parent]
-			child = parent
-		end
-
-		return
-	elseif not rowComesBefore(row, rows[1]) then
-		return
-	end
-
-	rows[1] = row
-	local parent = 1
-
-	while true do
-		local left = parent * 2
-		local right = left + 1
-		local greatest = parent
-
-		if left <= #rows and rowComesBefore(rows[greatest], rows[left]) then
-			greatest = left
-		end
-
-		if right <= #rows and rowComesBefore(rows[greatest], rows[right]) then
-			greatest = right
-		end
-
-		if greatest == parent then
-			break
-		end
-
-		rows[parent], rows[greatest] = rows[greatest], rows[parent]
-		parent = greatest
-	end
+	InspectUtil.AddBoundedRow(rows, row, constants.maxScriptRows)
 end
 
-local function clearModelSourceCaches()
+local function releaseModels()
 	for _, log in pairs(scriptLogs) do
 		local model = log and log.LocalScript
 
-		if model and type(model.ClearFunctionSourceCache) == "function" then
-			pcall(model.ClearFunctionSourceCache, model)
+		if model then
+			local dispose = model.Destroy or model.ClearFunctionSourceCache
+
+			if type(dispose) == "function" then
+				pcall(dispose, model)
+			end
 		end
 	end
 end
@@ -1055,7 +1013,7 @@ local function addScripts(query)
 	protosList:Clear()
 	constantsList:Clear()
 	environmentList:Clear()
-	clearModelSourceCaches()
+	releaseModels()
 	scriptLogs = {}
 	selected.scriptLog = nil
 	selected.logContext = nil
@@ -1157,7 +1115,7 @@ ListSearch.FocusLost:Connect(function(returned)
 	end
 end)
 
-ListRefresh.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(ListRefresh, function()
 	addScripts()
 end)
 
@@ -1193,7 +1151,7 @@ environmentSourceContext:SetCallback(function()
 	viewValue("Environment Value", selected.environmentIndex, selected.environmentValue)
 end)
 
-InfoBack.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(InfoBack, function()
 	functionInspectionGeneration = functionInspectionGeneration + 1
 	detailLoadGeneration = detailLoadGeneration + 1
 	detailRenderGeneration = detailRenderGeneration + 1
@@ -1258,7 +1216,7 @@ for _i, sectionButton in pairs(InfoOptions:GetChildren()) do
 		local enterAnimation = TweenService:Create(label, constants.fadeLength, { TextTransparency = 0 })
 		local leaveAnimation = TweenService:Create(label, constants.fadeLength, { TextTransparency = 0.2 })
 
-		sectionButton.MouseButton1Click:Connect(function()
+		ControlUtil.ConnectActivated(sectionButton, function()
 			functionInspectionGeneration = functionInspectionGeneration + 1
 			TextViewer.Hide(sourceViewer)
 			showSectionByName(sectionButton.Name)
@@ -1340,7 +1298,7 @@ Page.Destroying:Connect(function()
 	functionInspectionGeneration = functionInspectionGeneration + 1
 	detailLoadGeneration = detailLoadGeneration + 1
 	detailRenderGeneration = detailRenderGeneration + 1
-	clearModelSourceCaches()
+	releaseModels()
 	resetSummaryQueue()
 	TextViewer.Hide(sourceViewer)
 end)

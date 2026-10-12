@@ -202,8 +202,8 @@ local source = assert(builder.buildRemoteScript(remote, "InvokeServer", args, {
 assertNotContains(source, ".end", "reserved key uses bracket syntax")
 assertNotContains(source, "[nil", "unsupported keys are omitted")
 assertContains(source, "Warning:", "lossy values are disclosed")
-assertContains(source, "local OH_Table_1 = {}", "shared cyclic data uses graph locals")
-assertContains(source, "OH_Args.n = 4", "graph fallback preserves packed argument count")
+assertContains(source, "local OH_Tables = {}", "shared cyclic data uses one graph local")
+assertNotContains(source, "OH_Args", "small shared-table calls avoid a redundant argument prelude")
 
 local invocation = compileAndRun(source)
 assertEqual(invocation[1], "invoke-result", "InvokeServer first return")
@@ -340,5 +340,29 @@ end
 local oversizedOutput, outputError = builder.buildRemoteScript(remote, "FireServer", { n = 1, outputHeavy })
 assertEqual(oversizedOutput, nil, "output limit aborts generation before an oversized script is retained")
 assertContains(outputError, "output limit", "output limit reports a controlled error")
+
+for _, invalidCount in ipairs({ math.huge, -math.huge, 0 / 0, 1000000000 }) do
+    local rejectedCount, countError = builder.buildRemoteScript(remote, "FireServer", { n = invalidCount })
+    assertEqual(rejectedCount, nil, "invalid packed counts are rejected without unbounded traversal")
+    assertContains(countError, "argument count", "invalid count has a useful error")
+end
+
+oh.Settings.MaxGeneratedOutputBytes = 1048576
+local graph = {}
+for index = 1, 300 do
+    local node = { index = index }
+    node.self = node
+    graph[index] = node
+end
+local largeGraphSource = assert(builder.buildRemoteScript(remote, "FireServer", { n = 1, graph }))
+compileAndRun(largeGraphSource)
+assertEqual(#captured[1], 300, "large graphs compile without exhausting local variables")
+assertEqual(captured[1][300].self, captured[1][300], "large graphs preserve cyclic identity")
+
+local manyArguments = { n = 300, [1] = "first", [300] = "last" }
+local manyArgumentsSource = assert(builder.buildRemoteScript(remote, "FireServer", manyArguments))
+compileAndRun(manyArgumentsSource)
+assertEqual(captured.n, 300, "large replay tuples preserve explicit nil positions")
+assertEqual(captured[300], "last", "large replay tuples retain the last argument")
 
 print("scriptbuilder_spec.lua: ok")

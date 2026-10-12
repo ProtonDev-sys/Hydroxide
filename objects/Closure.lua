@@ -1,5 +1,7 @@
 local Closure = {}
-local closureCache = {}
+-- Active views own their models. Completed scans must not retain every closure
+-- and its captured environment for the rest of the session.
+local closureCache = setmetatable({}, { __mode = "kv" })
 
 local function getClosureEnvironment(data)
     if safeGetEnv then
@@ -31,7 +33,8 @@ function Closure.new(data)
     local closure = {}
     local infoRan, info = pcall(getInfo, data, "n")
     info = infoRan and info or nil
-    local name = info and info.name or ""
+    local name = type(info) == "table" and info.name or ""
+    name = type(name) == "string" and name or ""
 
     closure.Name = (name ~= "" and name) or "Unnamed function"
     closure.Data = data

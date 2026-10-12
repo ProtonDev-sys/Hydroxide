@@ -210,6 +210,21 @@ assertEqual(dataToString(0 / 0), "(0 / 0)", "NaN serialization")
 local binaryString = 'A"\\\0\n' .. string.char(0xFF)
 local binaryChunk = assert(load("return " .. dataToString(binaryString)))
 assertEqual(binaryChunk(), binaryString, "binary-safe string serialization")
+local allBytes = {}
+for byte = 0, 255 do allBytes[#allBytes + 1] = string.char(byte) end
+allBytes = table.concat(allBytes)
+local nestedBinary = assert(load("return " .. tableToString({ payload = allBytes })))()
+assertEqual(nestedBinary.payload, allBytes, "nested binary literals round-trip every byte without UTF-8 assumptions")
+local hostileLegacyTable = setmetatable({ safe = true }, { __pairs = function() error("unexpected __pairs") end })
+assertEqual(assert(load("return " .. tableToString(hostileLegacyTable)))().safe, true,
+    "legacy serialization does not invoke table iteration metamethods")
+local legacyDeep = {}
+local cursor = legacyDeep
+for index = 1, 80 do cursor.child = {}; cursor = cursor.child end
+assertContains(tableToString(legacyDeep), "table depth limit", "legacy table generation stops at a finite depth")
+local functionKey = function() end
+local safeKeys = assert(load("return " .. tableToString({ [functionKey] = "omitted", safe = true })))()
+assertEqual(safeKeys.safe, true, "unsupported legacy table keys cannot emit executable names")
 assertContains(tableToString(cyclic), "OH_CYCLIC_PROTECTION", "cyclic table protection")
 local expandedTree = formatValueTree(nested, {
 	MaxDepth = 8,
@@ -252,16 +267,15 @@ local generatedRemoteScript = buildRemoteScript(remoteEvent, "FireServer", {
 
 assertContains(
 	generatedRemoteScript,
-	'local OH_Remote = game:GetService("Workspace")["Probe Remote"]',
+	'return game:GetService("Workspace")["Probe Remote"]:FireServer(',
 	"remote path emitted"
 )
-assertContains(generatedRemoteScript, "OH_Args.n = 3", "nil argument count preserved")
-assertContains(generatedRemoteScript, "OH_Args[2] = nil", "nil argument emitted")
-assertContains(generatedRemoteScript, 'OH_Table_2["self"] = OH_Table_2', "cyclic table rebuilt")
-assertContains(generatedRemoteScript, 'OH_Table_1["first"] = OH_Table_2', "shared table reference rebuilt")
+assertContains(generatedRemoteScript, '"alpha", nil, OH_Tables[1]', "nil argument count preserved directly")
+assertContains(generatedRemoteScript, 'OH_Tables[2]["self"] = OH_Tables[2]', "cyclic table rebuilt")
+assertContains(generatedRemoteScript, 'OH_Tables[1]["first"] = OH_Tables[2]', "shared table reference rebuilt")
 assertContains(
 	generatedRemoteScript,
-	"return OH_Remote:FireServer(OH_Unpack(OH_Args, 1, OH_Args.n))",
+	':FireServer("alpha", nil, OH_Tables[1])',
 	"remote replay call emitted"
 )
 

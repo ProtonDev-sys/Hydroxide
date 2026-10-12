@@ -1,25 +1,42 @@
-local environment = assert(getgenv, "<OH> ~ Your exploit is not supported")()
-local previousRuntime = environment.oh
-
-if previousRuntime and type(previousRuntime.Exit) == "function" then
-	pcall(previousRuntime.Exit)
-end
-
-local HttpService = game:GetService("HttpService")
-
+local environment = assert(getgenv, "Hydroxide requires getgenv")()
 local config = type(environment.HydroxideConfig) == "table" and environment.HydroxideConfig or {}
 local web = config.web ~= false
 local user = config.owner or "ProtonDev-sys"
 local repository = config.repository or "Hydroxide"
-local branch = config.branch or "potassium-modernization-fork"
+local branch = config.branch or "main"
+
+assert(type(user) == "string" and user:match("^[%w_-]+$"), "Invalid Hydroxide repository owner")
+assert(
+	type(repository) == "string" and repository:match("^[%w_.-]+$") and repository ~= "." and repository ~= "..",
+	"Invalid Hydroxide repository name"
+)
+assert(type(branch) == "string" and #branch > 0 and #branch <= 255, "Invalid Hydroxide branch or commit")
+
+local previousRuntime = environment.oh
+
+if type(previousRuntime) == "table" and type(previousRuntime.Exit) == "function" then
+	assert(previousRuntime.Exit() ~= false, "Hydroxide could not finish closing its previous session; retry after cleanup")
+end
+
+local HttpService = game:GetService("HttpService")
 local importCache = {}
+local publishedGlobals = {}
+local originalGlobals = {}
+local runtime
+local sourceCache = {}
+local loadingSources = {}
+local loadingModules = {}
 local pack = table.pack or function(...)
 	return { n = select("#", ...), ... }
 end
 local unpackValues = table.unpack or unpack
 
 local function numberSetting(name, defaultValue, minimum, maximum)
-	local value = tonumber(config[name]) or defaultValue
+	local value = tonumber(config[name])
+
+	if not value or value ~= value or value == math.huge or value == -math.huge then
+		value = defaultValue
+	end
 
 	value = math.floor(value)
 	return math.max(minimum, math.min(maximum, value))
@@ -57,14 +74,11 @@ local runtimeSettings = {
 	MaxScriptRows = numberSetting("maxScriptRows", 750, 50, 2000),
 	MaxModuleRows = numberSetting("maxModuleRows", 750, 50, 2000),
 	MaxModuleFunctions = numberSetting("maxModuleFunctions", 32, 1, 128),
-	-- Zero keeps RakNet snapshots until the user clears them. Positive values
-	-- opt into count-based eviction for unusually long capture sessions.
-	MaxRakNetLogs = numberSetting("maxRakNetLogs", 0, 0, 5000),
+	-- Explicit zero retains snapshots until Clear; the default bounds memory.
+	MaxRakNetLogs = numberSetting("maxRakNetLogs", 500, 0, 5000),
 	MaxRenderedRakNetLogs = numberSetting("maxRenderedRakNetLogs", 100, 10, 500),
 	MaxRakNetPacketBytes = numberSetting("maxRakNetPacketBytes", 65536, 256, 16777216),
-	-- Zero disables aggregate-history eviction; each individual packet remains
-	-- bounded by MaxRakNetPacketBytes and the UI renders a small moving window.
-	MaxRakNetHistoryBytes = numberSetting("maxRakNetHistoryBytes", 0, 0, 67108864),
+	MaxRakNetHistoryBytes = numberSetting("maxRakNetHistoryBytes", 16777216, 0, 67108864),
 	MaxRakNetGeneratedOutputBytes = numberSetting("maxRakNetGeneratedOutputBytes", 1048576, 1024, 8388608),
 }
 
@@ -72,7 +86,7 @@ local function pick(...)
 	for index = 1, select("#", ...) do
 		local value = select(index, ...)
 
-		if value ~= nil then
+		if type(value) == "function" then
 			return value
 		end
 	end
@@ -80,7 +94,7 @@ end
 
 local function hasMethods(methods)
 	for name in pairs(methods) do
-		if not environment[name] then
+		if type(environment[name]) ~= "function" then
 			return false
 		end
 	end
@@ -91,15 +105,19 @@ end
 local function useMethods(module)
 	for name, method in pairs(module) do
 		if method ~= nil then
+			if publishedGlobals[name] == nil then
+				originalGlobals[name] = { Value = environment[name] }
+			end
+			publishedGlobals[name] = method
 			environment[name] = method
 		end
 	end
 end
 
 local function makeSetReadOnly()
-	if setreadonly then
+	if type(setreadonly) == "function" then
 		return setreadonly
-	elseif makereadonly and makewritable then
+	elseif type(makereadonly) == "function" and type(makewritable) == "function" then
 		return function(target, readonly)
 			if readonly and makereadonly then
 				return makereadonly(target)
@@ -107,7 +125,7 @@ local function makeSetReadOnly()
 				return makewritable(target)
 			end
 		end
-	elseif make_readonly and make_writeable then
+	elseif type(make_readonly) == "function" and type(make_writeable) == "function" then
 		return function(target, readonly)
 			if readonly and make_readonly then
 				return make_readonly(target)
@@ -147,10 +165,17 @@ local function makeHookMetaMethod(getMetatable)
 	end
 end
 
+local function getLibrary(name, fallback)
+	local value = environment[name]
+	return type(value) == "table" and value or type(fallback) == "table" and fallback or {}
+end
+
 local rawGetMetatable = pick(getrawmetatable, debug.getmetatable)
-local othLibrary = pick(environment.oth, oth)
-local httpLibrary = pick(environment.http, http)
-local raknetLibrary = pick(environment.raknet, raknet)
+local othLibrary = getLibrary("oth", oth)
+local httpLibrary = getLibrary("http", http)
+local raknetLibrary = getLibrary("raknet", raknet)
+local cryptLibrary = getLibrary("crypt", crypt)
+local hashContent = pick(cryptLibrary.hash)
 local canonicalMethods = {
 	checkcaller = pick(checkcaller, environment.checkcaller),
 	newcclosure = pick(newcclosure, environment.newcclosure),
@@ -335,6 +360,7 @@ local function withExecutorIdentityCompat(callback, ...)
 end
 
 local function getLuaClosuresCompat()
+	local filterError
 	if canonicalMethods.filtergc then
 		local ran, closures = pcall(canonicalMethods.filtergc, "function", {
 			IgnoreExecutor = true,
@@ -348,17 +374,22 @@ local function getLuaClosuresCompat()
 			local filtered = {}
 
 			for _, closure in pairs(closures) do
-				if canonicalMethods.islclosure(closure) then
+				if type(closure) == "function" and canonicalMethods.islclosure(closure) then
 					filtered[#filtered + 1] = closure
 				end
 			end
 
 			return filtered
 		end
+		filterError = ran and "filtergc did not return a table" or closures
 	end
 
 	local closures = {}
-	local objects = canonicalMethods.getgc and canonicalMethods.getgc(false) or {}
+	if not canonicalMethods.getgc then
+		error(filterError or "Closure enumeration is unavailable", 0)
+	end
+	local objects = canonicalMethods.getgc(false)
+	assert(type(objects) == "table", "getgc did not return a table")
 
 	for _, object in pairs(objects) do
 		if
@@ -374,12 +405,17 @@ local function getLuaClosuresCompat()
 end
 
 local function getRunningScriptsCompat()
+	local scanError
 	if canonicalMethods.getrunningscripts then
 		local ran, scripts = pcall(canonicalMethods.getrunningscripts)
 
 		if ran and type(scripts) == "table" then
 			return scripts
 		end
+		scanError = ran and "getrunningscripts did not return a table" or scripts
+	end
+	if not (canonicalMethods.filtergc or canonicalMethods.getgc) then
+		error(scanError or "Running script enumeration is unavailable", 0)
 	end
 
 	local scripts = {}
@@ -400,176 +436,144 @@ local function getRunningScriptsCompat()
 	return scripts
 end
 
-local globalMethods = {
-	checkcaller = canonicalMethods.checkcaller,
-	newcclosure = canonicalMethods.newcclosure,
-	hookfunction = canonicalMethods.hookfunction,
-	restorefunction = canonicalMethods.restorefunction,
-	decompile = canonicalMethods.decompile,
-	filtergc = canonicalMethods.filtergc,
-	getgc = canonicalMethods.getgc,
-	getfunctionhash = canonicalMethods.getfunctionhash,
-	getluaclosures = getLuaClosuresCompat,
-	getcallstack = canonicalMethods.getcallstack,
-	getinfo = canonicalMethods.getinfo,
-	getsenv = canonicalMethods.getsenv,
-	getmenv = canonicalMethods.getmenv,
-	gettenv = canonicalMethods.gettenv,
-	getthreadidentity = canonicalMethods.getthreadidentity,
-	getconnections = canonicalMethods.getconnections,
-	getscriptbytecode = canonicalMethods.getscriptbytecode,
-	getscriptclosure = canonicalMethods.getscriptclosure,
-	getscriptfromthread = canonicalMethods.getscriptfromthread,
-	getrunningscripts = getRunningScriptsCompat,
-	getscripthash = canonicalMethods.getscripthash,
-	getscripts = canonicalMethods.getscripts,
-	getnamecallmethod = canonicalMethods.getnamecallmethod,
-	getcallingscript = canonicalMethods.getcallingscript,
-	getloadedmodules = canonicalMethods.getloadedmodules,
-	getconstants = getConstantsCompat,
-	getupvalues = getUpvaluesCompat,
-	getprotos = canonicalMethods.getprotos,
-	getstack = canonicalMethods.getstack,
-	getconstant = getConstantCompat,
-	getupvalue = getUpvalueCompat,
-	getproto = canonicalMethods.getproto,
-	getrawmetatable = canonicalMethods.getrawmetatable,
-	gethui = canonicalMethods.gethui,
-	setclipboard = canonicalMethods.setclipboard,
-	setconstant = canonicalMethods.setconstant,
-	setthreadidentity = canonicalMethods.setthreadidentity,
-	withthreadidentity = canonicalMethods.getthreadidentity
-		and canonicalMethods.setthreadidentity
-		and withThreadIdentityCompat,
-	withExecutorIdentity = canonicalMethods.getthreadidentity
-		and canonicalMethods.setthreadidentity
-		and withExecutorIdentityCompat,
-	setupvalue = canonicalMethods.setupvalue,
-	setstack = canonicalMethods.setstack,
-	setreadonly = canonicalMethods.setreadonly,
-	islclosure = canonicalMethods.islclosure,
-	isreadonly = canonicalMethods.isreadonly,
-	isexecutorclosure = canonicalMethods.isexecutorclosure,
-	hookmetamethod = canonicalMethods.hookmetamethod,
-	readfile = canonicalMethods.readfile,
-	writefile = canonicalMethods.writefile,
-	makefolder = canonicalMethods.makefolder,
-	isfolder = canonicalMethods.isfolder,
-	isfile = canonicalMethods.isfile,
-	httpget = canonicalMethods.httpget,
-	request = canonicalMethods.request,
-	identifyexecutor = canonicalMethods.identifyexecutor,
-	othHook = canonicalMethods.oth_hook,
-	othUnhook = canonicalMethods.oth_unhook,
-	othGetRootCallback = canonicalMethods.oth_get_root_callback,
-	othGetOriginalThread = canonicalMethods.oth_get_original_thread,
-	othIsHookThread = canonicalMethods.oth_is_hook_thread,
-	raknetAddSendHook = canonicalMethods.raknet_add_send_hook,
-	raknetRemoveSendHook = canonicalMethods.raknet_remove_send_hook,
-	raknetAddReceiveHook = canonicalMethods.raknet_add_receive_hook,
-	raknetRemoveReceiveHook = canonicalMethods.raknet_remove_receive_hook,
-	raknetSend = canonicalMethods.raknet_send,
+local globalMethods = {}
+
+for name, method in pairs(canonicalMethods) do
+	if type(method) == "function" then
+		globalMethods[name] = method
+	end
+end
+
+globalMethods.getluaclosures = (globalMethods.filtergc or globalMethods.getgc) and getLuaClosuresCompat
+globalMethods.getrunningscripts = (globalMethods.getrunningscripts or globalMethods.getluaclosures)
+	and getRunningScriptsCompat
+globalMethods.getconstants = globalMethods.getconstants and getConstantsCompat
+globalMethods.getupvalues = globalMethods.getupvalues and getUpvaluesCompat
+globalMethods.getconstant = (globalMethods.getconstant or globalMethods.getconstants) and getConstantCompat
+globalMethods.getupvalue = globalMethods.getupvalue and getUpvalueCompat
+
+if globalMethods.getthreadidentity and globalMethods.setthreadidentity then
+	globalMethods.withthreadidentity = withThreadIdentityCompat
+	globalMethods.withExecutorIdentity = withExecutorIdentityCompat
+end
+
+-- Keep legacy module names at this boundary without copying the API table twice.
+local aliases = {
+	checkCaller = "checkcaller",
+	newCClosure = "newcclosure",
+	hookFunction = "hookfunction",
+	restoreFunction = "restorefunction",
+	filterGc = "filtergc",
+	getGc = "getgc",
+	getFunctionHash = "getfunctionhash",
+	getLuaClosures = "getluaclosures",
+	getCallStack = "getcallstack",
+	getInfo = "getinfo",
+	getSenv = "getsenv",
+	getMenv = "getmenv",
+	getTenv = "gettenv",
+	getContext = "getthreadidentity",
+	getConnections = "getconnections",
+	getScriptBytecode = "getscriptbytecode",
+	getScriptClosure = "getscriptclosure",
+	getScriptFromThread = "getscriptfromthread",
+	getRunningScripts = "getrunningscripts",
+	getScriptHash = "getscripthash",
+	getScripts = "getscripts",
+	getNamecallMethod = "getnamecallmethod",
+	getCallingScript = "getcallingscript",
+	getLoadedModules = "getloadedmodules",
+	getConstants = "getconstants",
+	getUpvalues = "getupvalues",
+	getProtos = "getprotos",
+	getStack = "getstack",
+	getConstant = "getconstant",
+	getUpvalue = "getupvalue",
+	getProto = "getproto",
+	getMetatable = "getrawmetatable",
+	getHui = "gethui",
+	setClipboard = "setclipboard",
+	setConstant = "setconstant",
+	setContext = "setthreadidentity",
+	withThreadIdentity = "withthreadidentity",
+	setUpvalue = "setupvalue",
+	setStack = "setstack",
+	setReadOnly = "setreadonly",
+	isLClosure = "islclosure",
+	isReadOnly = "isreadonly",
+	isXClosure = "isexecutorclosure",
+	hookMetaMethod = "hookmetamethod",
+	readFile = "readfile",
+	writeFile = "writefile",
+	makeFolder = "makefolder",
+	isFolder = "isfolder",
+	isFile = "isfile",
+	othHook = "oth_hook",
+	othUnhook = "oth_unhook",
+	othGetRootCallback = "oth_get_root_callback",
+	othGetOriginalThread = "oth_get_original_thread",
+	othIsHookThread = "oth_is_hook_thread",
+	raknetAddSendHook = "raknet_add_send_hook",
+	raknetRemoveSendHook = "raknet_remove_send_hook",
+	raknetAddReceiveHook = "raknet_add_receive_hook",
+	raknetRemoveReceiveHook = "raknet_remove_receive_hook",
+	raknetSend = "raknet_send",
 }
 
-globalMethods.checkCaller = globalMethods.checkcaller
-globalMethods.newCClosure = globalMethods.newcclosure
-globalMethods.hookFunction = globalMethods.hookfunction
-globalMethods.restoreFunction = globalMethods.restorefunction
-globalMethods.filterGc = globalMethods.filtergc
-globalMethods.getGc = globalMethods.getgc
-globalMethods.getFunctionHash = globalMethods.getfunctionhash
-globalMethods.getLuaClosures = globalMethods.getluaclosures
-globalMethods.getCallStack = globalMethods.getcallstack
-globalMethods.getInfo = globalMethods.getinfo
-globalMethods.getSenv = globalMethods.getsenv
-globalMethods.getMenv = globalMethods.getmenv
-globalMethods.getTenv = globalMethods.gettenv
-globalMethods.getContext = globalMethods.getthreadidentity
-globalMethods.getConnections = globalMethods.getconnections
-globalMethods.getScriptBytecode = globalMethods.getscriptbytecode
-globalMethods.getScriptClosure = globalMethods.getscriptclosure
-globalMethods.getScriptFromThread = globalMethods.getscriptfromthread
-globalMethods.getRunningScripts = globalMethods.getrunningscripts
-globalMethods.getScriptHash = globalMethods.getscripthash
-globalMethods.getScripts = globalMethods.getscripts
-globalMethods.getNamecallMethod = globalMethods.getnamecallmethod
-globalMethods.getCallingScript = globalMethods.getcallingscript
-globalMethods.getLoadedModules = globalMethods.getloadedmodules
-globalMethods.getConstants = globalMethods.getconstants
-globalMethods.getUpvalues = globalMethods.getupvalues
-globalMethods.getProtos = globalMethods.getprotos
-globalMethods.getStack = globalMethods.getstack
-globalMethods.getConstant = globalMethods.getconstant
-globalMethods.getUpvalue = globalMethods.getupvalue
-globalMethods.getProto = globalMethods.getproto
-globalMethods.getMetatable = globalMethods.getrawmetatable
-globalMethods.getHui = globalMethods.gethui
-globalMethods.setClipboard = globalMethods.setclipboard
-globalMethods.setConstant = globalMethods.setconstant
-globalMethods.setContext = globalMethods.setthreadidentity
-globalMethods.withThreadIdentity = globalMethods.withthreadidentity
-globalMethods.setUpvalue = globalMethods.setupvalue
-globalMethods.setStack = globalMethods.setstack
-globalMethods.setReadOnly = globalMethods.setreadonly
-globalMethods.isLClosure = globalMethods.islclosure
-globalMethods.isReadOnly = globalMethods.isreadonly
-globalMethods.isXClosure = globalMethods.isexecutorclosure
-globalMethods.hookMetaMethod = globalMethods.hookmetamethod
-globalMethods.readFile = globalMethods.readfile
-globalMethods.writeFile = globalMethods.writefile
-globalMethods.makeFolder = globalMethods.makefolder
-globalMethods.isFolder = globalMethods.isfolder
-globalMethods.isFile = globalMethods.isfile
-globalMethods.raknet_add_send_hook = globalMethods.raknetAddSendHook
-globalMethods.raknet_remove_send_hook = globalMethods.raknetRemoveSendHook
-globalMethods.raknet_add_receive_hook = globalMethods.raknetAddReceiveHook
-globalMethods.raknet_remove_receive_hook = globalMethods.raknetRemoveReceiveHook
-globalMethods.raknet_send = globalMethods.raknetSend
+for alias, name in pairs(aliases) do
+	globalMethods[alias] = globalMethods[name]
+end
 
-local function httpGet(url)
-	local requestFn = globalMethods.request
+local MAX_SOURCE_BYTES = 1048576
 
-	if requestFn then
-		local ran, response = pcall(requestFn, {
-			Url = url,
-			Method = "GET",
-		})
+local function httpGet(url, maximumBytes)
+	maximumBytes = maximumBytes or MAX_SOURCE_BYTES
+	local lastError
+	local function accept(body)
+		if type(body) ~= "string" or #body == 0 then
+			return nil
+		end
+		assert(#body <= maximumBytes, "Hydroxide response exceeds the size limit: " .. url)
+		return body
+	end
 
-		if
-			ran
-			and response
-			and (response.Success or (response.StatusCode and response.StatusCode >= 200 and response.StatusCode < 300))
-			and type(response.Body) == "string"
-		then
-			return response.Body
+	if globalMethods.request then
+		local ran, response = pcall(globalMethods.request, { Url = url, Method = "GET" })
+		if ran and type(response) == "table" then
+			local status = response.StatusCode
+			local success = type(status) == "number" and status >= 200 and status < 300
+				or status == nil and response.Success == true
+			if success then
+				local body = accept(response.Body)
+				if body then
+					return body
+				end
+			end
+			lastError = "HTTP " .. tostring(status or "unknown")
+		else
+			lastError = tostring(response)
 		end
 	end
 
-	if globalMethods.httpget then
-		local ran, response = pcall(globalMethods.httpget, url)
-
-		if ran and type(response) == "string" then
-			return response
+	local fallbacks = {
+		globalMethods.httpget or false,
+		function() return game:HttpGet(url) end,
+		function() return game:HttpGetAsync(url) end,
+	}
+	for _, getter in ipairs(fallbacks) do
+		if getter then
+			local ran, response = pcall(getter, url)
+			if ran then
+				local body = accept(response)
+				if body then
+					return body
+				end
+			else
+				lastError = tostring(response)
+			end
 		end
 	end
-
-	local ran, response = pcall(function()
-		return game:HttpGet(url)
-	end)
-
-	if ran and type(response) == "string" then
-		return response
-	end
-
-	ran, response = pcall(function()
-		return game:HttpGetAsync(url)
-	end)
-
-	if ran and type(response) == "string" then
-		return response
-	end
-
-	error("Unable to GET remote content: " .. url)
+	error("Hydroxide could not download " .. url .. ": " .. tostring(lastError or "empty response"), 0)
 end
 
 local function resolveBranchVersion(targetUser, targetRepository, targetBranch)
@@ -586,52 +590,45 @@ end
 globalMethods.httpGet = httpGet
 globalMethods.resolveBranchVersion = resolveBranchVersion
 
-local function cacheFilePath(asset, hasFolderFunctions, targetUser, version)
-	if hasFolderFunctions then
-		return ("hydroxide/cache/%s/%s/%s.lua"):format(targetUser, version, asset)
-	end
+local function isCommit(value)
+	return type(value) == "string" and #value == 40 and value:match("^%x+$") ~= nil
+end
 
-	return ("hydroxide-%s-%s-%s.lua"):format(targetUser, version, asset:gsub("/", "-"))
+local function validateAsset(asset)
+	assert(
+		type(asset) == "string" and asset:match("^[%w_][%w_/-]*$")
+			and not asset:find("//", 1, true) and asset:sub(-1) ~= "/",
+		"Invalid Hydroxide module path"
+	)
+	return asset
+end
+
+local function cacheFilePath(asset, hasFolders, version)
+	if hasFolders then
+		return ("hydroxide/cache/%s/%s/%s/%s.lua"):format(user, repository, version, asset)
+	end
+	return ("hydroxide-%s-%s-%s-%s.lua"):format(user, repository, version, asset:gsub("/", "-"))
 end
 
 local function rawAssetUrl(targetUser, targetRepository, targetBranch, asset)
 	return ("https://raw.githubusercontent.com/%s/%s/%s/%s.lua"):format(
-		targetUser,
-		targetRepository,
-		targetBranch,
-		asset
+		targetUser, targetRepository, targetBranch, validateAsset(asset)
 	)
 end
 
-local function ensureCacheFolders(targetUser, version)
-	if not (globalMethods.isFolder and globalMethods.makeFolder) then
-		return
-	end
-
-	local function createFolder(path)
-		if not globalMethods.isFolder(path) then
-			globalMethods.makeFolder(path)
+local function ensureCacheFolder(file)
+	local folder = ""
+	for component in file:gmatch("([^/]+)/") do
+		folder = folder == "" and component or folder .. "/" .. component
+		if not globalMethods.isFolder(folder) then
+			globalMethods.makeFolder(folder)
 		end
 	end
-
-	createFolder("hydroxide")
-	createFolder("hydroxide/cache")
-	createFolder("hydroxide/cache/" .. targetUser)
-
-	local versionRoot = "hydroxide/cache/" .. targetUser .. "/" .. version
-
-	createFolder(versionRoot)
-	createFolder(versionRoot .. "/methods")
-	createFolder(versionRoot .. "/modules")
-	createFolder(versionRoot .. "/objects")
-	createFolder(versionRoot .. "/ui")
-	createFolder(versionRoot .. "/ui/controls")
-	createFolder(versionRoot .. "/ui/modules")
 end
 
 local function restoreHookRecord(hook)
 	if type(hook) ~= "table" or hook.Active == false then
-		return
+		return true
 	end
 
 	local restored = false
@@ -787,283 +784,326 @@ local function createFunctionSourceCacheBudget(maximumEntries, maximumBytes)
 	return budget
 end
 
-local executorName = "Unknown"
-local executorVersion = "Unknown"
+local function initialize()
+	local executorName = "Unknown"
+	local executorVersion = "Unknown"
 
-if globalMethods.identifyexecutor then
-	local ran, name, version = pcall(globalMethods.identifyexecutor)
+	if globalMethods.identifyexecutor then
+		local ran, name, version = pcall(globalMethods.identifyexecutor)
 
-	if ran then
-		executorName = name or executorName
-		executorVersion = version or executorVersion
-	end
-end
-
-if globalMethods.getthreadidentity then
-	local ran, identity = pcall(globalMethods.getthreadidentity)
-
-	if ran and type(identity) == "number" then
-		executorIdentity = identity
-	end
-end
-
-environment.hasMethods = hasMethods
-environment.oh = {
-	Events = {},
-	Hooks = {},
-	Instances = {},
-	DisabledConnections = {},
-	Cache = importCache,
-	Methods = globalMethods,
-	Settings = runtimeSettings,
-	FunctionSourceCache = createFunctionSourceCacheBudget(
-		runtimeSettings.MaxFunctionSourceCacheEntries,
-		runtimeSettings.MaxFunctionSourceCacheBytes
-	),
-	Runtime = {
-		Name = executorName,
-		Version = executorVersion,
-		Identity = executorIdentity,
-		Owner = user,
-		Repository = repository,
-		Branch = branch,
-	},
-	Constants = {
-		Types = {
-			["nil"] = "rbxassetid://4800232219",
-			table = "rbxassetid://4666594276",
-			string = "rbxassetid://4666593882",
-			number = "rbxassetid://4666593882",
-			boolean = "rbxassetid://4666593882",
-			userdata = "rbxassetid://4666594723",
-			vector = "rbxassetid://4666594723",
-			buffer = "rbxassetid://4666593882",
-			["function"] = "rbxassetid://4666593447",
-			["thread"] = "rbxassetid://4666593447",
-			["integral"] = "rbxassetid://4666593882",
-		},
-		Syntax = {
-			["nil"] = Color3.fromRGB(244, 135, 113),
-			table = Color3.fromRGB(225, 225, 225),
-			string = Color3.fromRGB(225, 150, 85),
-			number = Color3.fromRGB(170, 225, 127),
-			boolean = Color3.fromRGB(127, 200, 255),
-			userdata = Color3.fromRGB(225, 225, 225),
-			vector = Color3.fromRGB(225, 225, 225),
-			buffer = Color3.fromRGB(170, 225, 127),
-			["function"] = Color3.fromRGB(225, 225, 225),
-			["thread"] = Color3.fromRGB(225, 225, 225),
-			["unnamed_function"] = Color3.fromRGB(175, 175, 175),
-		},
-	},
-	Exit = function()
-		local runtime = environment.oh
-
-		if not runtime then
-			return
+		if ran then
+			executorName = name or executorName
+			executorVersion = version or executorVersion
 		end
+	end
 
+	if globalMethods.getthreadidentity then
+		local ran, identity = pcall(globalMethods.getthreadidentity)
+
+		if ran and type(identity) == "number" then
+			executorIdentity = identity
+		end
+	end
+
+	runtime = {
+		Exited = false,
+		Events = {},
+		Hooks = {},
+		Instances = {},
+		DisabledConnections = {},
+		Cache = importCache,
+		Methods = globalMethods,
+		Settings = runtimeSettings,
+		FunctionSourceCache = createFunctionSourceCacheBudget(
+			runtimeSettings.MaxFunctionSourceCacheEntries,
+			runtimeSettings.MaxFunctionSourceCacheBytes
+		),
+		Runtime = {
+			Name = executorName,
+			Version = executorVersion,
+			Identity = executorIdentity,
+			Owner = user,
+			Repository = repository,
+			Branch = branch,
+		},
+		Constants = {
+			Types = {
+				["nil"] = "rbxassetid://4800232219",
+				table = "rbxassetid://4666594276",
+				string = "rbxassetid://4666593882",
+				number = "rbxassetid://4666593882",
+				boolean = "rbxassetid://4666593882",
+				userdata = "rbxassetid://4666594723",
+				vector = "rbxassetid://4666594723",
+				buffer = "rbxassetid://4666593882",
+				["function"] = "rbxassetid://4666593447",
+				["thread"] = "rbxassetid://4666593447",
+				["integral"] = "rbxassetid://4666593882",
+			},
+			Syntax = {
+				["nil"] = Color3.fromRGB(244, 135, 113),
+				table = Color3.fromRGB(225, 225, 225),
+				string = Color3.fromRGB(225, 150, 85),
+				number = Color3.fromRGB(170, 225, 127),
+				boolean = Color3.fromRGB(127, 200, 255),
+				userdata = Color3.fromRGB(225, 225, 225),
+				vector = Color3.fromRGB(225, 225, 225),
+				buffer = Color3.fromRGB(170, 225, 127),
+				["function"] = Color3.fromRGB(225, 225, 225),
+				["thread"] = Color3.fromRGB(225, 225, 225),
+				["unnamed_function"] = Color3.fromRGB(175, 175, 175),
+			},
+		},
+	}
+
+	local exitRunning = false
+	function runtime.Exit()
+		if exitRunning then
+			return false
+		elseif runtime.ExitComplete then
+			return true
+		end
+		exitRunning = true
+		runtime.Exited = true
+		local pendingEvents, pendingHooks, pendingConnections, pendingInstances = {}, {}, {}, {}
 		for _, event in pairs(runtime.Events) do
-			if event and event.Disconnect then
-				pcall(function()
-					event:Disconnect()
-				end)
+			local ran, result = pcall(function()
+				if event and event.Disconnect then
+					return event:Disconnect()
+				end
+			end)
+			if not ran or result == false then
+				pendingEvents[#pendingEvents + 1] = event
 			end
 		end
-
 		for _, hook in pairs(runtime.Hooks) do
-			restoreHookRecord(hook)
+			if not restoreHookRecord(hook) then
+				pendingHooks[#pendingHooks + 1] = hook
+			end
 		end
-
 		for _, connection in pairs(runtime.DisabledConnections) do
-			if connection and connection.Enable then
-				pcall(function()
-					connection:Enable()
-				end)
+			local ran, result = pcall(function()
+				if connection and connection.Enable then
+					return connection:Enable()
+				end
+			end)
+			if not ran or result == false then
+				pendingConnections[#pendingConnections + 1] = connection
 			end
 		end
+		runtime.Events, runtime.Hooks, runtime.DisabledConnections = pendingEvents, pendingHooks, pendingConnections
 
+		local destroyed = {}
+		local function destroy(instance)
+			if typeof(instance) == "Instance" and not destroyed[instance] then
+				destroyed[instance] = true
+				local ran, result = pcall(function() return instance:Destroy() end)
+				if not ran or result == false then
+					pendingInstances[#pendingInstances + 1] = instance
+				end
+			end
+		end
 		for _, instance in pairs(runtime.Instances) do
-			if typeof(instance) == "Instance" then
-				pcall(function()
-					instance:Destroy()
-				end)
+			destroy(instance)
+		end
+		for asset, values in pairs(importCache) do
+			if asset:match("^rbxassetid://%d+$") then
+				destroy(values[1])
+			end
+			importCache[asset] = nil
+		end
+		for asset in pairs(sourceCache) do
+			sourceCache[asset] = nil
+		end
+		runtime.Instances = pendingInstances
+		runtime.FunctionSourceCache:Clear()
+		runtime.ExitComplete = #pendingEvents == 0 and #pendingHooks == 0 and #pendingConnections == 0
+			and #pendingInstances == 0
+		if runtime.ExitComplete and environment.oh == runtime then
+			for name, value in pairs(publishedGlobals) do
+				if environment[name] == value then
+					environment[name] = originalGlobals[name].Value
+				end
 			end
 		end
+		exitRunning = false
+		return runtime.ExitComplete
+	end
 
-		local ui = importCache["rbxassetid://11389137937"]
-		local assets = importCache["rbxassetid://5042114982"]
+	useMethods({ oh = runtime, hasMethods = hasMethods })
 
-		if ui and ui[1] then
-			pcall(function()
-				ui[1]:Destroy()
-			end)
-		end
+	useMethods(globalMethods)
+	useMethods({
+		httpGet = httpGet,
+		resolveBranchVersion = resolveBranchVersion,
+	})
 
-		if assets and assets[1] then
-			pcall(function()
-				assets[1]:Destroy()
-			end)
-		end
+	if config.suppressScriptErrors == true and globalMethods.getConnections then
+		local ran, connections = pcall(globalMethods.getConnections, game:GetService("ScriptContext").Error)
 
-		if runtime.FunctionSourceCache and runtime.FunctionSourceCache.Clear then
-			pcall(function()
-				runtime.FunctionSourceCache:Clear()
-			end)
-		end
+		if ran and type(connections) == "table" then
+			for _, connection in pairs(connections) do
+				if connection and connection.Disable and connection.Enabled ~= false then
+					local disabled = pcall(function()
+						connection:Disable()
+					end)
 
-		environment.oh = nil
-	end,
-}
-
-useMethods(globalMethods)
-useMethods({
-	httpGet = httpGet,
-	resolveBranchVersion = resolveBranchVersion,
-})
-
-if config.suppressScriptErrors ~= false and globalMethods.getConnections then
-	local ran, connections = pcall(globalMethods.getConnections, game:GetService("ScriptContext").Error)
-
-	if ran and type(connections) == "table" then
-		for _, connection in pairs(connections) do
-			if connection and connection.Disable and connection.Enabled ~= false then
-				local disabled = pcall(function()
-					connection:Disable()
-				end)
-
-				if disabled then
-					environment.oh.DisabledConnections[#environment.oh.DisabledConnections + 1] = connection
+					if disabled then
+						runtime.DisabledConnections[#runtime.DisabledConnections + 1] = connection
+					end
 				end
 			end
 		end
 	end
-end
 
-local currentVersion = branch
-local versionResolved = branch:match("^%x+$") ~= nil and #branch == 40
-
-if web and not versionResolved then
-	local ran, result = pcall(resolveBranchVersion, user, repository, branch)
-
-	if ran and result then
-		currentVersion = result
-		versionResolved = true
+	local sourceRef = branch
+	if web and not isCommit(sourceRef) then
+		local ran, result = pcall(resolveBranchVersion, user, repository, branch)
+		assert(ran and isCommit(result), "Could not resolve Hydroxide branch; retry or set branch to a full commit SHA")
+		sourceRef = result
 	end
-end
-
-local cacheVersion = currentVersion:gsub("[^%w_-]", "_")
-local sourceRef = versionResolved and currentVersion or branch
-environment.oh.Runtime.Commit = versionResolved and currentVersion or nil
-
-local hasFileIO = globalMethods.readFile and globalMethods.writeFile
-local hasFolderFunctions = globalMethods.isFolder and globalMethods.makeFolder
-local usePersistentCache = web and hasFileIO and config.cache ~= false and versionResolved
-
-if usePersistentCache then
-	local cacheReady = pcall(ensureCacheFolders, user, cacheVersion)
-	usePersistentCache = cacheReady
-end
-
-local function executeSource(content, chunkName)
-	local chunk, compileError = loadstring(content, chunkName)
-
-	assert(chunk, compileError)
-	return pack(chunk())
-end
-
-local sourceCache = {}
-
-local function loadWebSource(asset)
-	if sourceCache[asset] then
-		return sourceCache[asset]
+	if isCommit(sourceRef) then
+		sourceRef = sourceRef:lower()
+		runtime.Runtime.Commit = sourceRef
 	end
 
-	local content
-
-	if usePersistentCache then
-		local file = cacheFilePath(asset, hasFolderFunctions, user, cacheVersion)
-		local canReadCache = true
-
-		if globalMethods.isFile then
-			local checked, exists = pcall(globalMethods.isFile, file)
-			canReadCache = checked and exists
-		end
-
-		if canReadCache then
-			local ran, result = pcall(globalMethods.readFile, file)
-
-			if ran and type(result) == "string" then
-				content = result
-			end
-		end
-
-		if not content then
-			content = httpGet(rawAssetUrl(user, repository, sourceRef, asset))
-			pcall(globalMethods.writeFile, file, content)
-		end
-	else
-		content = httpGet(rawAssetUrl(user, repository, sourceRef, asset))
-	end
-
-	sourceCache[asset] = content
-	return content
-end
-
-local function prefetch(assets)
-	if not web or type(assets) ~= "table" then
-		return true, {}
-	end
-
-	local queue = {}
-	local seen = {}
-
-	for _, asset in ipairs(assets) do
-		if
-			type(asset) == "string"
-			and not asset:find("rbxassetid://", 1, true)
-			and not importCache[asset]
-			and not sourceCache[asset]
-			and not seen[asset]
-		then
-			seen[asset] = true
-			queue[#queue + 1] = asset
-		end
-	end
-
-	if #queue == 0 then
-		return true, {}
-	end
-
-	local errors = {}
-
-	if not (task and task.spawn) then
-		for _, asset in ipairs(queue) do
-			local loaded, loadError = pcall(loadWebSource, asset)
-
-			if not loaded then
-				errors[#errors + 1] = ("%s: %s"):format(asset, tostring(loadError))
-			end
-		end
-
-		return #errors == 0, errors
-	end
-
-	local nextIndex = 0
-	local workerCount = math.min(runtimeSettings.MaxConcurrentImports, #queue)
-	local remainingWorkers = workerCount
-
-	for _ = 1, workerCount do
-		task.spawn(function()
-			while true do
-				nextIndex = nextIndex + 1
-
-				local asset = queue[nextIndex]
-
-				if not asset then
-					break
+	local hasFolders = globalMethods.isFolder and globalMethods.makeFolder
+	local usePersistentCache = false
+	local sourceHashes
+	if web and config.cache ~= false and hashContent and globalMethods.readFile and globalMethods.writeFile then
+		-- Verify the documented hash format before trusting files from local storage.
+		local hashed, digest = pcall(hashContent, "", "sha1")
+		if hashed and type(digest) == "string" and digest:lower() == "da39a3ee5e6b4b0d3255bfef95601890afd80709" then
+			local fetched, tree = pcall(function()
+				local url = ("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1"):format(user, repository, sourceRef)
+				return HttpService:JSONDecode(httpGet(url, MAX_SOURCE_BYTES * 4))
+			end)
+			if fetched and type(tree) == "table" and tree.truncated == false and type(tree.tree) == "table" then
+				sourceHashes = {}
+				for _, entry in ipairs(tree.tree) do
+					if type(entry) == "table" and entry.type == "blob" and isCommit(entry.sha)
+						and type(entry.path) == "string" and entry.path:sub(-4) == ".lua" then
+						sourceHashes[entry.path:sub(1, -5)] = entry.sha:lower()
+					end
 				end
+				usePersistentCache = true
+			end
+		end
+	end
+	runtime.Runtime.PersistentCache = usePersistentCache
 
+	local function ensureActive()
+		assert(not runtime.Exited and environment.oh == runtime, "Hydroxide session was closed")
+	end
+
+	local function runOnce(pendingLoads, asset, callback)
+		ensureActive()
+		local pending = pendingLoads[asset]
+		if pending then
+			assert(pending.Owner ~= coroutine.running(), "Circular Hydroxide import: " .. asset)
+			while not pending.Results do
+				assert(task and task.wait, "Concurrent Hydroxide imports require task.wait")
+				task.wait()
+				ensureActive()
+			end
+		else
+			pending = { Owner = coroutine.running() }
+			pendingLoads[asset] = pending
+			pending.Results = pack(pcall(callback))
+			pendingLoads[asset] = nil
+		end
+		local results = pending.Results
+		if not results[1] then
+			error(results[2], 0)
+		end
+		ensureActive()
+		return unpackValues(results, 2, results.n)
+	end
+
+	local function validateSource(content, asset)
+		assert(type(content) == "string" and #content > 0, "Empty Hydroxide source: " .. asset)
+		assert(#content <= MAX_SOURCE_BYTES, "Hydroxide source exceeds the size limit: " .. asset)
+		if sourceHashes then
+			local expected = sourceHashes[asset]
+			assert(expected, "Hydroxide module is missing from the resolved commit: " .. asset)
+			local digest = hashContent("blob " .. #content .. "\0" .. content, "sha1")
+			assert(type(digest) == "string" and digest:lower() == expected, "Hydroxide source checksum mismatch: " .. asset)
+		end
+		return content
+	end
+
+	local importAsset, prefetch
+	local function executeSource(content, chunkName)
+		-- Bind session locals without setfenv: a yielded module or callback must
+		-- never resolve oh/import/prefetch from a replacement session's globals.
+		local chunk, compileError = loadstring("return function(oh, import, prefetch, ...) " .. content .. "\nend", chunkName)
+		assert(type(chunk) == "function", compileError or "Hydroxide source did not compile: " .. chunkName)
+		ensureActive()
+		return pack(chunk()(runtime, importAsset, prefetch))
+	end
+
+	local function loadWebSource(asset)
+		validateAsset(asset)
+		if sourceCache[asset] then
+			return sourceCache[asset]
+		end
+		return runOnce(loadingSources, asset, function()
+			local content
+			local file = usePersistentCache and cacheFilePath(asset, hasFolders, sourceRef)
+			if file then
+				local read, cached = pcall(globalMethods.readFile, file)
+				if read and pcall(validateSource, cached, asset) then
+					content = cached
+				end
+			end
+			if not content then
+				content = validateSource(httpGet(rawAssetUrl(user, repository, sourceRef, asset)), asset)
+				ensureActive()
+				if file then
+					pcall(function()
+						if hasFolders then
+							ensureCacheFolder(file)
+						end
+						globalMethods.writeFile(file, content)
+					end)
+				end
+			end
+			ensureActive()
+			sourceCache[asset] = content
+			return content
+		end)
+	end
+
+	prefetch = function(assets)
+		ensureActive()
+		if not web or type(assets) ~= "table" then
+			return true, {}
+		end
+
+		local queue = {}
+		local seen = {}
+
+		for _, asset in ipairs(assets) do
+			if
+				type(asset) == "string"
+				and not asset:match("^rbxassetid://%d+$")
+				and not importCache[asset]
+				and not sourceCache[asset]
+				and not seen[asset]
+			then
+				seen[asset] = true
+				queue[#queue + 1] = asset
+			end
+		end
+
+		if #queue == 0 then
+			return true, {}
+		end
+
+		local errors = {}
+
+		if not (task and task.spawn) then
+			for _, asset in ipairs(queue) do
 				local loaded, loadError = pcall(loadWebSource, asset)
 
 				if not loaded then
@@ -1071,51 +1111,107 @@ local function prefetch(assets)
 				end
 			end
 
-			remainingWorkers = remainingWorkers - 1
+			return #errors == 0, errors
+		end
+
+		local nextIndex = 0
+		local workerCount = math.min(runtimeSettings.MaxConcurrentImports, #queue)
+		local remainingWorkers = workerCount
+
+		for _ = 1, workerCount do
+			task.spawn(function()
+				while not runtime.Exited do
+					nextIndex = nextIndex + 1
+
+					local asset = queue[nextIndex]
+
+					if not asset then
+						break
+					end
+
+					local loaded, loadError = pcall(loadWebSource, asset)
+
+					if not loaded then
+						errors[#errors + 1] = ("%s: %s"):format(asset, tostring(loadError))
+					end
+				end
+
+				remainingWorkers = remainingWorkers - 1
+			end)
+		end
+
+		while remainingWorkers > 0 do
+			ensureActive()
+			task.wait()
+		end
+
+		return #errors == 0, errors
+	end
+
+	importAsset = function(asset)
+		ensureActive()
+		assert(type(asset) == "string", "Hydroxide imports require a module path or asset ID")
+		local assetId = asset:match("^rbxassetid://%d+$")
+		if not assetId then
+			validateAsset(asset)
+		end
+		if importCache[asset] then
+			local cached = importCache[asset]
+			return unpackValues(cached, 1, cached.n)
+		end
+		return runOnce(loadingModules, asset, function()
+			local assets
+			if assetId then
+				local objects = game:GetObjects(asset)
+				assert(objects and objects[1], "Hydroxide could not load UI asset: " .. asset)
+				if runtime.Exited or environment.oh ~= runtime then
+					for _, object in pairs(objects) do
+						runtime.Instances[#runtime.Instances + 1] = object
+					end
+					runtime.ExitComplete = false
+					runtime.Exit()
+					ensureActive()
+				end
+				assets = pack(objects[1])
+			elseif web then
+				assets = executeSource(loadWebSource(asset), asset .. ".lua")
+				sourceCache[asset] = nil
+			else
+				assert(globalMethods.readFile, "Local imports require readfile")
+				local content = globalMethods.readFile("hydroxide/" .. asset .. ".lua")
+				assets = executeSource(validateSource(content, asset), asset .. ".lua")
+			end
+			ensureActive()
+			importCache[asset] = assets
+			return unpackValues(assets, 1, assets.n)
 		end)
 	end
 
-	while remainingWorkers > 0 do
-		task.wait()
-	end
+	ensureActive()
+	useMethods({
+		import = importAsset,
+		prefetch = prefetch,
+		httpGet = httpGet,
+		resolveBranchVersion = resolveBranchVersion,
+	})
 
-	return #errors == 0, errors
+	useMethods(importAsset("methods/string"))
+	useMethods(importAsset("methods/table"))
+	useMethods(importAsset("methods/userdata"))
+	useMethods(importAsset("methods/scriptbuilder"))
+	useMethods(importAsset("methods/environment"))
+
+	if config.autoLaunch ~= false then
+		importAsset("ui/main")
+	end
+	return runtime
 end
 
-function environment.import(asset)
-	if importCache[asset] then
-		local cached = importCache[asset]
-		return unpackValues(cached, 1, cached.n or #cached)
+local initialized, result = pcall(initialize)
+if not initialized then
+	if runtime and runtime.Exit then
+		pcall(runtime.Exit)
 	end
-
-	local assets
-
-	if asset:find("rbxassetid://", 1, true) then
-		assets = pack(game:GetObjects(asset)[1])
-	elseif web then
-		local content = loadWebSource(asset)
-		assets = executeSource(content, asset .. ".lua")
-		sourceCache[asset] = nil
-	else
-		assert(globalMethods.readFile, "Local imports require readfile")
-		assets = executeSource(globalMethods.readFile("hydroxide/" .. asset .. ".lua"), asset .. ".lua")
-	end
-
-	importCache[asset] = assets
-	return unpackValues(assets, 1, assets.n or #assets)
+	error("Hydroxide initialization failed: " .. tostring(result), 0)
 end
-
-useMethods({
-	import = environment.import,
-	prefetch = prefetch,
-	httpGet = httpGet,
-	resolveBranchVersion = resolveBranchVersion,
-})
-
-useMethods(import("methods/string"))
-useMethods(import("methods/table"))
-useMethods(import("methods/userdata"))
-useMethods(import("methods/scriptbuilder"))
-useMethods(import("methods/environment"))
-
---import("ui/main")
+return result
