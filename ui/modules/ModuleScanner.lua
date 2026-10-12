@@ -1,3 +1,5 @@
+local ControlUtil = import("ui/ControlUtil")
+local InspectUtil = import("ui/InspectUtil")
 local TextService = game:GetService("TextService")
 local TweenService = game:GetService("TweenService")
 
@@ -857,7 +859,7 @@ end
 for name, button in pairs(sectionButtons) do
 	local sectionName = name
 
-	button.MouseButton1Click:Connect(function()
+	ControlUtil.ConnectActivated(button, function()
 		showSection(sectionName)
 	end)
 
@@ -908,7 +910,7 @@ local function openInspector(log)
 	showSection("Source")
 end
 
-Back.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(Back, function()
 	resumeSection = currentSection or resumeSection
 	detailGeneration = detailGeneration + 1
 	currentSection = nil
@@ -1176,66 +1178,22 @@ resetMetadataQueue = function()
 	metadataQueueTail = 0
 end
 
-local function rowComesBefore(left, right)
-	if left.Sort == right.Sort then
-		return left.Stable < right.Stable
-	end
-
-	return left.Sort < right.Sort
-end
+local rowComesBefore = InspectUtil.RowComesBefore
 
 local function addBoundedRow(rows, row)
-	if #rows < limits.moduleRows then
-		rows[#rows + 1] = row
-		local child = #rows
-
-		while child > 1 do
-			local parent = math.floor(child / 2)
-
-			if not rowComesBefore(rows[parent], rows[child]) then
-				break
-			end
-
-			rows[parent], rows[child] = rows[child], rows[parent]
-			child = parent
-		end
-
-		return
-	elseif not rowComesBefore(row, rows[1]) then
-		return
-	end
-
-	rows[1] = row
-	local parent = 1
-
-	while true do
-		local left = parent * 2
-		local right = left + 1
-		local greatest = parent
-
-		if left <= #rows and rowComesBefore(rows[greatest], rows[left]) then
-			greatest = left
-		end
-
-		if right <= #rows and rowComesBefore(rows[greatest], rows[right]) then
-			greatest = right
-		end
-
-		if greatest == parent then
-			break
-		end
-
-		rows[parent], rows[greatest] = rows[greatest], rows[parent]
-		parent = greatest
-	end
+	InspectUtil.AddBoundedRow(rows, row, limits.moduleRows)
 end
 
-local function clearModelSourceCaches()
+local function releaseModels()
 	for _, log in pairs(moduleLogs) do
 		local model = log and log.ModuleScript
 
-		if model and type(model.ClearFunctionSourceCache) == "function" then
-			pcall(model.ClearFunctionSourceCache, model)
+		if model then
+			local dispose = model.Destroy or model.ClearFunctionSourceCache
+
+			if type(dispose) == "function" then
+				pcall(dispose, model)
+			end
 		end
 	end
 end
@@ -1285,7 +1243,7 @@ addModules = function(query)
 	ResultsFrame.Visible = true
 	resetMetadataQueue()
 	moduleList:Clear()
-	clearModelSourceCaches()
+	releaseModels()
 	moduleLogs = {}
 	selectedLog = nil
 
@@ -1372,12 +1330,12 @@ Page.Destroying:Connect(function()
 	scanLoading = false
 	scanGeneration = scanGeneration + 1
 	detailGeneration = detailGeneration + 1
-	clearModelSourceCaches()
+	releaseModels()
 	resetMetadataQueue()
 	TextViewer.Hide(detailViewer)
 end)
 
-Refresh.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(Refresh, function()
 	addModules()
 end)
 

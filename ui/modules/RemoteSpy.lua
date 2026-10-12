@@ -1,3 +1,4 @@
+local ControlUtil = import("ui/ControlUtil")
 local TextService = game:GetService("TextService")
 local TweenService = game:GetService("TweenService")
 
@@ -6,6 +7,7 @@ local Methods = import("modules/RemoteSpy")
 local ClosureSpy = import("modules/ClosureSpy")
 local Closure = import("objects/Closure")
 local Theme = oh.Theme or import("ui/Theme")
+local InspectUtil = import("ui/InspectUtil")
 
 if not hasMethods(Methods.RequiredMethods) then
 	return RemoteSpy
@@ -339,9 +341,7 @@ local function getMaxHexBytes()
 	return math.max(1, math.floor(value))
 end
 
-local function getArgCount(args)
-	return type(args) == "table" and (tonumber(args.n) or #args) or 0
-end
+local getArgCount = InspectUtil.PackedCount
 
 local function clearSelectedCall(button)
 	if button and selected.callPodButton ~= button then
@@ -484,180 +484,11 @@ local function getRemoteMethod(remoteInstance, callInfo)
 	end
 end
 
-local function truncate(value, limit)
-	value = tostring(value)
-
-	if #value > limit then
-		return value:sub(1, limit) .. "... (" .. #value .. " chars)"
-	end
-
-	return value
-end
-
-local function instanceSummary(value)
-	local ran, fullName = pcall(function()
-		return value:GetFullName()
-	end)
-
-	if ran and fullName then
-		return fullName
-	end
-
-	return tostring(value)
-end
-
-local function argumentSummary(value)
-	if type(value) == "table" and rawget(value, "__hydroxideCaptureMarker") == true then
-		return ("%s capture unavailable: %s"):format(
-			tostring(value.Kind or "value"),
-			tostring(value.Detail or "unknown reason")
-		)
-	end
-
-	if type(summarizeValue) == "function" then
-		local maxLength = (oh.Settings and oh.Settings.MaxArgumentPreviewLength) or 140
-		local ran, result = pcall(summarizeValue, value, maxLength)
-
-		if ran and type(result) == "string" then
-			return result
-		end
-	end
-
-	local valueType = typeof(value)
-	local rawType = type(value)
-
-	if rawType == "string" then
-		return '"' .. truncate(value:gsub("\n", "\\n"), 120) .. '"'
-	elseif rawType == "table" or valueType == "table" then
-		local count = 0
-
-		for _key in pairs(value) do
-			count = count + 1
-
-			if count >= 1000 then
-				return "table (1000+ entries)"
-			end
-		end
-
-		return ("table (%d entries)"):format(count)
-	elseif rawType == "function" then
-		return "function"
-	elseif valueType == "Instance" then
-		return truncate(instanceSummary(value), 140)
-	elseif rawType == "nil" then
-		return "nil"
-	end
-
-	return truncate(tostring(value), 140)
-end
-
-local function expandedValue(value, maximumBytes)
-	local rawType = type(value)
-	local valueType = typeof(value)
-
-	if
-		type(formatValueTree) ~= "function"
-		or rawType ~= "table"
-		or (valueType ~= "table" and valueType ~= "SharedTable")
-		or rawget(value, "__hydroxideCaptureMarker") == true
-	then
-		return nil
-	end
-
-	local settings = oh.Settings or {}
-	local ran, result = pcall(formatValueTree, value, {
-		MaxDepth = settings.MaxValueViewDepth or settings.maxValueViewDepth,
-		MaxEntries = settings.MaxValueViewEntries or settings.maxValueViewEntries,
-		MaxTableEntries = settings.MaxValueViewTableEntries or settings.maxValueViewTableEntries,
-		MaxOutputBytes = maximumBytes,
-	})
-
-	if ran and type(result) == "string" and result ~= "" then
-		return result
-	end
-
-	return ran and nil or ("<table inspection failed: %s>"):format(tostring(result))
-end
-
-local function formatTimestamp(timestamp)
-	if type(timestamp) ~= "number" then
-		return "unknown"
-	end
-
-	local seconds = math.floor(timestamp)
-	local milliseconds = math.floor((timestamp - seconds) * 1000 + 0.5) % 1000
-	local ran, formatted = pcall(os.date, "%Y-%m-%d %H:%M:%S", seconds)
-
-	if ran and type(formatted) == "string" then
-		return ("%s.%03d local"):format(formatted, milliseconds)
-	end
-
-	return ("%.3f"):format(timestamp)
-end
-
-local function safeInstancePath(instance)
-	if typeof(instance) ~= "Instance" then
-		return nil
-	end
-
-	local ran, path = pcall(getInstancePath, instance)
-	return ran and path or nil
-end
-
-local function cleanSource(source)
-	if type(source) ~= "string" then
-		return "unknown"
-	end
-
-	return source:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^[@=]", "")
-end
-
-local function describePackedValues(title, values)
-	local count = getArgCount(values)
-	local settings = oh.Settings or {}
-	local maximumBytes =
-		math.max(1024, math.floor(tonumber(settings.MaxValueViewBytes or settings.maxValueViewBytes) or 65536))
-	local lines = {
-		title,
-		("Count: %d"):format(count),
-		"",
-	}
-
-	if count == 0 then
-		lines[#lines + 1] = "(none)"
-		return table.concat(lines, "\n")
-	end
-
-	local outputBytes = #title + 32
-
-	for index = 1, count do
-		local value = values[index]
-		local valueType = typeof(value)
-		local header = ("[%02d]  %s"):format(index, valueType)
-		local remaining = maximumBytes - outputBytes - #header - 2
-
-		if remaining < 256 then
-			lines[#lines + 1] = "... <value viewer output limit reached>"
-			break
-		end
-
-		local expanded = expandedValue(value, remaining)
-
-		if expanded then
-			lines[#lines + 1] = header
-			lines[#lines + 1] = expanded
-			lines[#lines + 1] = ""
-			outputBytes = outputBytes + #header + #expanded + 2
-		else
-			local detail = valueType == "Instance" and safeInstancePath(value) or argumentSummary(value)
-			local line = ("%-24s  %s"):format(header, detail or "unavailable")
-			lines[#lines + 1] = line
-			outputBytes = outputBytes + #line + 1
-		end
-	end
-
-	return table.concat(lines, "\n")
-end
+local argumentSummary = InspectUtil.Summary
+local formatTimestamp = InspectUtil.Timestamp
+local safeInstancePath = InspectUtil.InstancePath
+local cleanSource = InspectUtil.CleanSource
+local describePackedValues = InspectUtil.DescribePackedValues
 
 local function describeFunction(func, isAlive)
 	return FunctionInspector.DescribeFunction(func, {
@@ -1693,16 +1524,16 @@ ListSearch.FocusLost:Connect(function(returned)
 	end
 end)
 
-ListRefresh.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(ListRefresh, function()
 	refreshLogs()
 end)
 
-LogsBack.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(LogsBack, function()
 	RemoteLogs.Visible = false
 	RemoteList.Visible = true
 end)
 
-LogsButtons.Ignore.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(LogsButtons.Ignore, function()
 	local selectedLog = selected.remoteLog
 	local selectedRemote = selectedLog and selectedLog.Remote
 
@@ -1723,7 +1554,7 @@ LogsButtons.Ignore.MouseButton1Click:Connect(function()
 	end
 end)
 
-LogsButtons.Block.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(LogsButtons.Block, function()
 	local selectedLog = selected.remoteLog
 	local selectedRemote = selectedLog and selectedLog.Remote
 
@@ -1744,7 +1575,7 @@ LogsButtons.Block.MouseButton1Click:Connect(function()
 	end
 end)
 
-LogsButtons.Clear.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(LogsButtons.Clear, function()
 	local selectedLog = selected.remoteLog
 	local selectedRemote = selectedLog and selectedLog.Remote
 
@@ -1753,7 +1584,7 @@ LogsButtons.Clear.MouseButton1Click:Connect(function()
 	end
 end)
 
-LogsButtons.Conditions.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(LogsButtons.Conditions, function()
 	local selectedLog = selected.remoteLog
 	local selectedRemote = selectedLog and selectedLog.Remote
 
@@ -1766,7 +1597,7 @@ LogsButtons.Conditions.MouseButton1Click:Connect(function()
 	createConditions(selectedRemote)
 end)
 
-ConditionsBack.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(ConditionsBack, function()
 	RemoteConditions.Visible = false
 
 	if selected.remoteLog then
@@ -1968,7 +1799,7 @@ local function parseConditionValue(valueType, text)
 	return value
 end
 
-ConditionsButtons.New.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(ConditionsButtons.New, function()
 	if not conditionStatus.Selected then
 		conditionStatus:SetSelected("Ignore")
 	end
@@ -1985,7 +1816,7 @@ ConditionsButtons.New.MouseButton1Click:Connect(function()
 	newRemoteCondition:Show()
 end)
 
-NewConditionButtons.Add.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(NewConditionButtons.Add, function()
 	local status = conditionStatus.Selected and conditionStatus.Selected.Name
 	local selectedType = conditionType.Selected and conditionType.Selected.Name
 	local valueType = conditionValueType.Selected and conditionValueType.Selected.Name
@@ -2047,16 +1878,16 @@ NewConditionButtons.Add.MouseButton1Click:Connect(function()
 	newRemoteCondition:Hide()
 end)
 
-NewConditionButtons.Cancel.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(NewConditionButtons.Cancel, function()
 	newRemoteCondition:Hide()
 end)
 
-NewConditionIndex.Add.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(NewConditionIndex.Add, function()
 	local newIndex = (validConditionIndex(NewConditionIndex.Value.Input.Text) or 1) + 1
 	prefillCondition(newIndex, conditionValueType.Selected and conditionValueType.Selected.Name == "Value")
 end)
 
-NewConditionIndex.Sub.MouseButton1Click:Connect(function()
+ControlUtil.ConnectActivated(NewConditionIndex.Sub, function()
 	local newIndex = math.max(1, (validConditionIndex(NewConditionIndex.Value.Input.Text) or 1) - 1)
 	prefillCondition(newIndex, conditionValueType.Selected and conditionValueType.Selected.Name == "Value")
 end)

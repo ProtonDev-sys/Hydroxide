@@ -70,44 +70,28 @@ end
 local function settingNumber(name, minimum, maximum)
 	local settings = oh and oh.Settings or {}
 	local value = tonumber(settings[name] or settings[lowerSettingName(name)]) or DEFAULTS[name]
+	if value ~= value or value == math.huge or value == -math.huge then
+		value = DEFAULTS[name]
+	end
 
 	value = math.floor(value)
 	return math.max(minimum, math.min(maximum, value))
 end
 
+local escapes = {
+    ['"'] = '\\"', ['\\'] = '\\\\',
+    ['\a'] = '\\a', ['\b'] = '\\b', ['\t'] = '\\t', ['\n'] = '\\n',
+    ['\v'] = '\\v', ['\f'] = '\\f', ['\r'] = '\\r'
+}
+
+local function escapeString(value)
+    return (value:gsub('[%z\1-\31\127-\255"\\]', function(character)
+        return escapes[character] or ("\\%03d"):format(character:byte())
+    end))
+end
+
 local function quoteString(value)
-	local parts = { '"' }
-
-	for index = 1, #value do
-		local byte = value:byte(index)
-
-		if byte == 34 then
-			parts[#parts + 1] = '\\"'
-		elseif byte == 92 then
-			parts[#parts + 1] = "\\\\"
-		elseif byte == 7 then
-			parts[#parts + 1] = "\\a"
-		elseif byte == 8 then
-			parts[#parts + 1] = "\\b"
-		elseif byte == 9 then
-			parts[#parts + 1] = "\\t"
-		elseif byte == 10 then
-			parts[#parts + 1] = "\\n"
-		elseif byte == 11 then
-			parts[#parts + 1] = "\\v"
-		elseif byte == 12 then
-			parts[#parts + 1] = "\\f"
-		elseif byte == 13 then
-			parts[#parts + 1] = "\\r"
-		elseif byte < 32 or byte > 126 then
-			parts[#parts + 1] = ("\\%03d"):format(byte)
-		else
-			parts[#parts + 1] = string.char(byte)
-		end
-	end
-
-	parts[#parts + 1] = '"'
-	return table.concat(parts)
+    return '"' .. escapeString(value) .. '"'
 end
 
 local function commentText(value, maxLength)
@@ -147,7 +131,10 @@ local function getArgCount(args)
 		return 0
 	end
 
-	local count = tonumber(args.n) or #args
+	local count = tonumber(rawget(args, "n")) or #args
+	if count ~= count or count == math.huge or count == -math.huge or count < 0 or count > 1024 then
+		return nil
+	end
 	return math.max(0, math.floor(count))
 end
 
@@ -444,10 +431,15 @@ local function makeSerializer(state)
 
 			local measured, byteLength = pcall(buffer.len, value)
 
-			if not measured or type(byteLength) ~= "number" then
+			if not measured or type(byteLength) ~= "number" or byteLength ~= byteLength
+				or byteLength < 0 or byteLength == math.huge or byteLength % 1 ~= 0
+			then
 				return unsupported(valueType, isKey, "buffer length could not be read")
 			elseif byteLength > state.maxBufferBytes then
 				return unsupported(valueType, isKey, "buffer exceeds the configured byte limit")
+			elseif byteLength > state.maxOutputBytes then
+				state.outputExceeded = true
+				return "nil", not isKey
 			end
 
 			local ran, bytes = pcall(buffer.tostring, value)
@@ -572,7 +564,7 @@ local function makeSerializer(state)
 		if not id then
 			return unsupported("table", isKey, "table graph limit reached")
 		elseif state.graphTables[value] then
-			return ("OH_Table_%d"):format(id), true
+			return ("OH_Tables[%d]"):format(id), true
 		elseif state.rendering[value] then
 			return unsupported("table", isKey, "cyclic table analysis failed")
 		end
@@ -601,11 +593,26 @@ local function makeSerializer(state)
 		end
 
 		local fields = {}
+		local fieldBytes = 0
+		local function addField(field)
+			if state.outputExceeded then
+				return false
+			end
+			fieldBytes = fieldBytes + #field + indentLevel + 4
+			if fieldBytes > state.maxOutputBytes then
+				state.outputExceeded = true
+				return false
+			end
+			fields[#fields + 1] = field
+			return true
+		end
 
 		if isArray then
 			for index = 1, maximumIndex do
 				local expression = serialize(arrayValues[index], false, indentLevel + 1)
-				fields[#fields + 1] = expression or "nil"
+				if not addField(expression or "nil") then
+					break
+				end
 			end
 		else
 			for _, entry in ipairs(entries) do
@@ -615,10 +622,10 @@ local function makeSerializer(state)
 				if keySupported and keyExpression then
 					local valueExpression = serialize(entry[2], false, indentLevel + 1) or "nil"
 
-					if isIdentifier(key) then
-						fields[#fields + 1] = key .. " = " .. valueExpression
-					else
-						fields[#fields + 1] = "[" .. keyExpression .. "] = " .. valueExpression
+					local field = isIdentifier(key) and (key .. " = " .. valueExpression)
+						or ("[" .. keyExpression .. "] = " .. valueExpression)
+					if not addField(field) then
+						break
 					end
 				end
 			end
@@ -643,6 +650,9 @@ local function makeSerializer(state)
 	end
 
 	serialize = function(value, isKey, indentLevel)
+		if state.outputExceeded then
+			return "nil", not isKey
+		end
 		indentLevel = indentLevel or 0
 		local rawType = type(value)
 		local valueType = safeTypeof(value)
@@ -656,6 +666,9 @@ local function makeSerializer(state)
 		elseif rawType == "string" then
 			if #value > state.maxStringBytes then
 				return unsupported("string", isKey, "string exceeds the configured byte limit")
+			elseif #value > state.maxOutputBytes then
+				state.outputExceeded = true
+				return "nil", not isKey
 			end
 
 			return quoteString(value), true
@@ -678,7 +691,7 @@ end
 local function appendLine(lines, state, line)
 	line = tostring(line or "")
 
-	if state.outputBytes + #line + 1 > state.maxOutputBytes then
+	if state.outputExceeded or state.outputBytes + #line + 1 > state.maxOutputBytes then
 		return false
 	end
 
@@ -701,9 +714,12 @@ local function emitTables(lines, state, serialize)
 	if not hasGraphTables(state) then
 		return true
 	end
+	if not appendLine(lines, state, "local OH_Tables = {}") then
+		return false
+	end
 
 	for id, tableValue in ipairs(state.order) do
-		if state.graphTables[tableValue] and not appendLine(lines, state, ("local OH_Table_%d = {}"):format(id)) then
+		if state.graphTables[tableValue] and not appendLine(lines, state, ("OH_Tables[%d] = {}"):format(id)) then
 			return false
 		end
 	end
@@ -724,7 +740,7 @@ local function emitTables(lines, state, serialize)
 						not appendLine(
 							lines,
 							state,
-							("OH_Table_%d[%s] = %s"):format(id, keyExpression, valueExpression or "nil")
+							("OH_Tables[%d][%s] = %s"):format(id, keyExpression, valueExpression or "nil")
 						)
 					then
 						return false
@@ -739,9 +755,14 @@ end
 
 local function emitRemoteCall(lines, state, remotePath, method, args, argCount, serialize)
 	local expressions = {}
+	local expressionBytes = #remotePath + #method + 12
 
 	for index = 1, argCount do
-		expressions[index] = serialize(args[index], false, 1) or "nil"
+		expressions[index] = serialize(rawget(args, index), false, 1) or "nil"
+		expressionBytes = expressionBytes + #expressions[index] + 2
+		if state.outputExceeded or expressionBytes > state.maxOutputBytes then
+			return false
+		end
 	end
 
 	local prefix = ("return %s:%s("):format(remotePath, method)
@@ -777,10 +798,13 @@ local function buildRemoteScript(remoteInstance, method, args, callInfo)
 
 	args = type(args) == "table" and args or {}
 	local argCount = getArgCount(args)
+	if not argCount then
+		return nil, "Cannot generate a replay script: argument count must be between 0 and 1024"
+	end
 	local state = makeState()
 
 	for index = 1, argCount do
-		collectTables(args[index], state, 0)
+		collectTables(rawget(args, index), state, 0)
 	end
 
 	markGraphTables(state)
@@ -788,7 +812,11 @@ local function buildRemoteScript(remoteInstance, method, args, callInfo)
 	local serialize = makeSerializer(state)
 	local body = {}
 
-	if hasGraphTables(state) then
+	if not emitTables(body, state, serialize) then
+		return nil, ("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
+	end
+
+	if argCount > 128 then
 		local prelude = {
 			"local OH_Unpack = table.unpack or unpack",
 			"local OH_Remote = " .. remotePath,
@@ -804,13 +832,8 @@ local function buildRemoteScript(remoteInstance, method, args, callInfo)
 			end
 		end
 
-		if not emitTables(body, state, serialize) then
-			return nil,
-				("Generated script exceeded the configured output limit (%d bytes)."):format(state.maxOutputBytes)
-		end
-
 		for index = 1, argCount do
-			local expression = serialize(args[index], false)
+			local expression = serialize(rawget(args, index), false)
 
 			if not appendLine(body, state, ("OH_Args[%d] = %s"):format(index, expression or "nil")) then
 				return nil,

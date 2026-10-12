@@ -1,4 +1,10 @@
 local RakNetSpy = {}
+local oh = oh
+local raknetAddSendHook = raknetAddSendHook
+local raknetRemoveSendHook = raknetRemoveSendHook
+local raknetAddReceiveHook = raknetAddReceiveHook
+local raknetRemoveReceiveHook = raknetRemoveReceiveHook
+local raknetSend = raknetSend
 
 local packValues = table.pack or function(...)
 	return { n = select("#", ...), ... }
@@ -20,36 +26,39 @@ local function settingNumber(names, defaultValue, minimum, maximum)
 		end
 	end
 
-	value = math.floor(value or defaultValue)
+	if not value or value ~= value or value == math.huge or value == -math.huge then
+		value = defaultValue
+	end
+	value = math.floor(value)
 	return math.max(minimum, math.min(maximum, value))
 end
 
-local function optionalPositiveSetting(names, maximum)
+local function optionalPositiveSetting(names, maximum, fallback)
 	for _, name in ipairs(names) do
 		if settings[name] ~= nil then
 			local value = tonumber(settings[name])
 
 			if not value or value ~= value or value == math.huge or value == -math.huge then
-				return nil
+				return fallback
 			end
 
 			value = math.floor(value)
 
-			if value < 1 then
+			if value == 0 then
 				return nil
+			elseif value < 1 then
+				return fallback
 			end
 
 			return math.min(maximum, value)
 		end
 	end
 
-	return nil
+	return fallback
 end
 
--- History is clear-only by default. Count/byte retention limits are intentionally
--- opt-in so captures never disappear merely because the page has been open for a
--- while. The UI bounds its own rendered window independently of these values.
-local maxLogs = optionalPositiveSetting({ "MaxRakNetLogs", "maxRakNetLogs" }, 5000)
+-- Bound long-running captures by default; explicit zero keeps history until Clear.
+local maxLogs = optionalPositiveSetting({ "MaxRakNetLogs", "maxRakNetLogs" }, 5000, 500)
 local maxPacketBytes = settingNumber(
 	{ "MaxRakNetPacketBytes", "MaxRakNetPayloadBytes", "maxRakNetPacketBytes", "maxRakNetPayloadBytes" },
 	DEFAULT_MAX_PACKET_BYTES,
@@ -58,7 +67,8 @@ local maxPacketBytes = settingNumber(
 )
 local maxHistoryBytes = optionalPositiveSetting(
 	{ "MaxRakNetHistoryBytes", "MaxRakNetTotalBytes", "maxRakNetHistoryBytes", "maxRakNetTotalBytes" },
-	67108864
+	67108864,
+	16777216
 )
 local maxGeneratedOutputBytes = settingNumber({
 	"MaxRakNetGeneratedOutputBytes",
@@ -99,7 +109,17 @@ local diagnostics = {
 
 local function safeError(value)
 	local ran, result = pcall(tostring, value)
-	return ran and result or "<unprintable error>"
+	return ran and result:sub(1, 2048) or "<unprintable error>"
+end
+
+local function finiteInteger(value)
+    return type(value) == "number" and value == value and value ~= math.huge
+        and value ~= -math.huge and value % 1 == 0
+end
+
+local function validSendMetadata(entry)
+    return finiteInteger(entry.Priority) and finiteInteger(entry.Reliability)
+        and finiteInteger(entry.OrderingChannel)
 end
 
 local function createHistory(capacity, byteCapacity)
@@ -219,6 +239,7 @@ local ignoredPacketIds = {}
 local blockedPacketIds = {}
 local listeners = {}
 local sequence = 0
+local disconnected = false
 
 local function packetIdKey(packetId)
 	local valueType = type(packetId)
@@ -347,7 +368,11 @@ local function connectEvent(callback)
 		listeners[self] = nil
 	end
 
-	listeners[connection] = callback
+	if disconnected or (oh and oh.Exited) then
+		connection.Connected = false
+	else
+		listeners[connection] = callback
+	end
 	return connection
 end
 
@@ -385,16 +410,8 @@ local function getBufferLength(value)
 	if type(buffer) == "table" and type(buffer.len) == "function" then
 		local ran, length = pcall(buffer.len, value)
 
-		if ran and type(length) == "number" and length >= 0 then
-			return math.floor(length)
-		end
-	end
-
-	if type(buffer) == "table" and type(buffer.tostring) == "function" then
-		local ran, bytes = pcall(buffer.tostring, value)
-
-		if ran and type(bytes) == "string" then
-			return #bytes
+		if ran and finiteInteger(length) and length >= 0 then
+			return length
 		end
 	end
 
@@ -415,6 +432,8 @@ local function bufferToString(value, limit)
 			return nil, "failed", safeError(bytes)
 		elseif type(bytes) ~= "string" then
 			return nil, "failed", "buffer.tostring did not return a string"
+		elseif length and #bytes ~= length then
+			return nil, "failed", "buffer contents length did not match buffer.len"
 		elseif #bytes > limit then
 			return nil, "truncated", ("buffer contains %d bytes (limit %d)"):format(#bytes, limit)
 		end
@@ -428,7 +447,7 @@ local function bufferToString(value, limit)
 		for index = 0, length - 1 do
 			local ran, byte = pcall(buffer.readu8, value, index)
 
-			if not ran or type(byte) ~= "number" or byte < 0 or byte > 255 then
+			if not ran or not finiteInteger(byte) or byte < 0 or byte > 255 then
 				return nil, "failed", ran and "buffer.readu8 returned an invalid byte" or safeError(byte)
 			end
 
@@ -460,7 +479,7 @@ local function copyArray(value, limit)
 		return #value
 	end)
 
-	if not ran or type(count) ~= "number" or count < 0 then
+	if not ran or not finiteInteger(count) or count < 0 then
 		return nil, "failed", ran and "AsArray has an invalid length" or safeError(count)
 	end
 
@@ -634,9 +653,7 @@ local function snapshotPacket(packet, direction, packetIdRead, packetId)
 
 	entry.Replayable = direction == "send"
 		and entry.PayloadComplete
-		and type(entry.Priority) == "number"
-		and type(entry.Reliability) == "number"
-		and type(entry.OrderingChannel) == "number"
+		and validSendMetadata(entry)
 		and type(raknetSend) == "function"
 
 	return entry
@@ -687,6 +704,9 @@ local function blockPacket(packet)
 end
 
 local function capture(packet, direction)
+	if oh and oh.Exited then
+		return
+	end
 	diagnostics.Callbacks = diagnostics.Callbacks + 1
 
 	if RakNetSpy.Enabled == false then
@@ -912,7 +932,7 @@ local function buildScript(entry)
 	local reliability = numberLiteral(entry.Reliability)
 	local orderingChannel = numberLiteral(entry.OrderingChannel)
 
-	if not (priority and reliability and orderingChannel) then
+	if not validSendMetadata(entry) then
 		return nil, "The captured RakNet send metadata is incomplete"
 	end
 
@@ -935,6 +955,9 @@ local function replay(entry)
 	if type(entry) ~= "table" then
 		diagnostics.ReplayFailures = diagnostics.ReplayFailures + 1
 		return false, "Select a captured RakNet packet first"
+	elseif disconnected or (oh and oh.Exited) then
+		diagnostics.ReplayFailures = diagnostics.ReplayFailures + 1
+		return false, "RakNet hooks are disconnected"
 	elseif entry.Direction ~= "send" then
 		diagnostics.ReplayFailures = diagnostics.ReplayFailures + 1
 		return false, "Incoming RakNet captures cannot be replayed"
@@ -947,11 +970,7 @@ local function replay(entry)
 	elseif blockedPacketIds[packetIdKey(entry.PacketId)] then
 		diagnostics.ReplayFailures = diagnostics.ReplayFailures + 1
 		return false, "This RakNet packet ID is blocked"
-	elseif
-		type(entry.Priority) ~= "number"
-		or type(entry.Reliability) ~= "number"
-		or type(entry.OrderingChannel) ~= "number"
-	then
+	elseif not validSendMetadata(entry) then
 		diagnostics.ReplayFailures = diagnostics.ReplayFailures + 1
 		return false, "The captured RakNet send metadata is incomplete"
 	end
@@ -970,49 +989,52 @@ local function replay(entry)
 	return true, unpackValues(results, 2, results.n)
 end
 
-local disconnected = false
 local teardown = {
 	Connected = true,
 }
 
 function teardown:Disconnect()
-	if disconnected then
-		return
-	end
+    local firstDisconnect = not disconnected
+    disconnected = true
+    RakNetSpy.Enabled = false
 
-	disconnected = true
-	self.Connected = false
-	RakNetSpy.Connected = false
-	RakNetSpy.Enabled = false
+    local function removeHook(flag, callback, remove, counter)
+        if not capabilities[flag] then
+            return
+        end
+        local ran, result = pcall(remove, callback)
+        if not ran or result == false then
+            diagnostics[counter] = diagnostics[counter] + 1
+            diagnostics.LastHookError = ran and "RakNet hook removal returned false" or safeError(result)
+        else
+            capabilities[flag] = false
+        end
+    end
 
-	if capabilities.SendHookInstalled then
-		local ran, err = pcall(raknetRemoveSendHook, sendCallback)
+    removeHook("SendHookInstalled", sendCallback, raknetRemoveSendHook, "SendHookRemoveErrors")
+    removeHook("ReceiveHookInstalled", receiveCallback, raknetRemoveReceiveHook, "ReceiveHookRemoveErrors")
+    self.Connected = capabilities.SendHookInstalled or capabilities.ReceiveHookInstalled
+    RakNetSpy.Connected = self.Connected
 
-		if not ran then
-			diagnostics.SendHookRemoveErrors = diagnostics.SendHookRemoveErrors + 1
-			diagnostics.LastHookError = safeError(err)
-		else
-			capabilities.SendHookInstalled = false
-		end
-	end
+    if firstDisconnect then
+        emit(nil, "disconnected")
+        for connection in pairs(listeners) do
+            connection.Connected = false
+            listeners[connection] = nil
+        end
+    end
 
-	if capabilities.ReceiveHookInstalled then
-		local ran, err = pcall(raknetRemoveReceiveHook, receiveCallback)
+    if self.Connected then
+        return false, diagnostics.LastHookError
+    end
+    return true
+end
 
-		if not ran then
-			diagnostics.ReceiveHookRemoveErrors = diagnostics.ReceiveHookRemoveErrors + 1
-			diagnostics.LastHookError = safeError(err)
-		else
-			capabilities.ReceiveHookInstalled = false
-		end
-	end
-
-	emit(nil, "disconnected")
-
-	for connection in pairs(listeners) do
-		connection.Connected = false
-		listeners[connection] = nil
-	end
+local function methodArguments(first, ...)
+    if first == RakNetSpy then
+        return ...
+    end
+    return first, ...
 end
 
 RakNetSpy.Enabled = true
@@ -1033,22 +1055,26 @@ RakNetSpy.Retention = {
 	MaxPacketBytes = maxPacketBytes,
 }
 RakNetSpy.PacketIdKey = function(first, second)
-	return packetIdKey(first == RakNetSpy and second or first)
+	return packetIdKey(methodArguments(first, second))
 end
 RakNetSpy.ConnectEvent = function(first, second)
-	return connectEvent(first == RakNetSpy and second or first)
+	return connectEvent(methodArguments(first, second))
 end
 RakNetSpy.BuildScript = function(first, second)
-	return buildScript(first == RakNetSpy and second or first)
+	return buildScript(methodArguments(first, second))
 end
 RakNetSpy.Replay = function(first, second)
-	return replay(first == RakNetSpy and second or first)
+	return replay(methodArguments(first, second))
 end
 RakNetSpy.Disconnect = function()
-	teardown:Disconnect()
+	return teardown:Disconnect()
 end
 RakNetSpy.SetEnabled = function(first, second)
-	local enabled = first == RakNetSpy and second or first
+	local enabled = methodArguments(first, second)
+    if disconnected or (oh and oh.Exited) or not RakNetSpy.Connected then
+        RakNetSpy.Enabled = false
+        return false, "RakNet hooks are disconnected"
+    end
 	RakNetSpy.Enabled = enabled ~= false
 	emit(nil, RakNetSpy.Enabled and "resumed" or "paused")
 	return RakNetSpy.Enabled
@@ -1060,12 +1086,11 @@ RakNetSpy.Resume = function()
 	return RakNetSpy.SetEnabled(true)
 end
 RakNetSpy.IsPacketIdIgnored = function(first, second)
-	local packetId = first == RakNetSpy and second or first
+	local packetId = methodArguments(first, second)
 	return ignoredPacketIds[packetIdKey(packetId)] ~= nil
 end
 RakNetSpy.SetPacketIdIgnored = function(first, second, third)
-	local packetId = first == RakNetSpy and second or first
-	local ignored = first == RakNetSpy and third or second
+	local packetId, ignored = methodArguments(first, second, third)
 	local key = packetIdKey(packetId)
 	local existing = ignoredPacketIds[key]
 
@@ -1090,11 +1115,11 @@ RakNetSpy.SetPacketIdIgnored = function(first, second, third)
 	return true
 end
 RakNetSpy.IgnorePacketId = function(first, second)
-	local packetId = first == RakNetSpy and second or first
+	local packetId = methodArguments(first, second)
 	return RakNetSpy.SetPacketIdIgnored(packetId, true)
 end
 RakNetSpy.UnignorePacketId = function(first, second)
-	local packetId = first == RakNetSpy and second or first
+	local packetId = methodArguments(first, second)
 	return RakNetSpy.SetPacketIdIgnored(packetId, false)
 end
 RakNetSpy.ClearIgnoredPacketIds = function()
@@ -1111,12 +1136,11 @@ RakNetSpy.ClearIgnoredPacketIds = function()
 	return changed
 end
 RakNetSpy.IsPacketIdBlocked = function(first, second)
-	local packetId = first == RakNetSpy and second or first
+	local packetId = methodArguments(first, second)
 	return blockedPacketIds[packetIdKey(packetId)] ~= nil
 end
 RakNetSpy.SetPacketIdBlocked = function(first, second, third)
-	local packetId = first == RakNetSpy and second or first
-	local blocked = first == RakNetSpy and third or second
+	local packetId, blocked = methodArguments(first, second, third)
 	local key = packetIdKey(packetId)
 	local existing = blockedPacketIds[key]
 
@@ -1141,11 +1165,11 @@ RakNetSpy.SetPacketIdBlocked = function(first, second, third)
 	return true
 end
 RakNetSpy.BlockPacketId = function(first, second)
-	local packetId = first == RakNetSpy and second or first
+	local packetId = methodArguments(first, second)
 	return RakNetSpy.SetPacketIdBlocked(packetId, true)
 end
 RakNetSpy.UnblockPacketId = function(first, second)
-	local packetId = first == RakNetSpy and second or first
+	local packetId = methodArguments(first, second)
 	return RakNetSpy.SetPacketIdBlocked(packetId, false)
 end
 RakNetSpy.ClearBlockedPacketIds = function()
@@ -1196,22 +1220,22 @@ end
 if capabilities.SendHook then
 	local ran, err = pcall(raknetAddSendHook, sendCallback)
 
-	if ran then
+	if ran and err ~= false then
 		capabilities.SendHookInstalled = true
 	else
 		diagnostics.SendHookRegisterErrors = diagnostics.SendHookRegisterErrors + 1
-		diagnostics.LastHookError = safeError(err)
+		diagnostics.LastHookError = ran and "RakNet send hook registration returned false" or safeError(err)
 	end
 end
 
 if capabilities.ReceiveHook then
 	local ran, err = pcall(raknetAddReceiveHook, receiveCallback)
 
-	if ran then
+	if ran and err ~= false then
 		capabilities.ReceiveHookInstalled = true
 	else
 		diagnostics.ReceiveHookRegisterErrors = diagnostics.ReceiveHookRegisterErrors + 1
-		diagnostics.LastHookError = safeError(err)
+		diagnostics.LastHookError = ran and "RakNet receive hook registration returned false" or safeError(err)
 	end
 end
 

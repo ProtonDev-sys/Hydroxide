@@ -1,6 +1,3 @@
-local client = game:GetService("Players").LocalPlayer
-local control = client and client:FindFirstChild("PlayerScripts") and client.PlayerScripts:FindFirstChild("Control Script")
-
 local methods = {}
 
 local function safeGetEnv(target)
@@ -28,37 +25,6 @@ local function safeGetClosureScript(target)
     return nil
 end
 
-local function secureCall(closure, ...)
-    if type(getfenv) ~= "function" or type(setfenv) ~= "function" then
-        return closure(...)
-    end
-
-    local env = getfenv(1)
-    local renv = getrenv and getrenv() or env
-    local arguments = table.pack(...)
-
-    setfenv(1, setmetatable({ script = script }, {
-        __index = renv
-    }))
-
-    local results = table.pack(pcall(function()
-        if syn and syn.secure_call and control then
-            return syn.secure_call(closure, control, table.unpack(arguments, 1, arguments.n))
-        end
-
-        return closure(table.unpack(arguments, 1, arguments.n))
-    end))
-
-    setfenv(1, env)
-
-    if not results[1] then
-        error(results[2], 0)
-    end
-
-    return table.unpack(results, 2, results.n)
-end
-
 methods.safeGetEnv = safeGetEnv
 methods.safeGetClosureScript = safeGetClosureScript
-methods.secureCall = secureCall
 return methods

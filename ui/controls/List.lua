@@ -56,6 +56,7 @@ function List.new(instance, multiClick)
 		Instance = instance,
 		MultiClickEnabled = multiClick == true,
 		RecalculateQueued = false,
+		RecalculateScheduled = false,
 	}
 
 	instance.CanvasSize = UDim2.new(0, 0, 0, 15)
@@ -77,11 +78,13 @@ end
 
 function ListButton.new(instance, list)
 	assert(instance and instance:IsA("GuiButton"), "ListButton.new expects a GuiButton")
+	assert(list and not list.Destroyed, "ListButton.new requires a live list")
 
 	local listButton = {
 		Connections = {},
 		Instance = instance,
 		List = list,
+		Selected = false,
 	}
 
 	listButton.SetCallback = ListButton.setCallback
@@ -98,7 +101,7 @@ function ListButton.new(instance, list)
 	Theme.ApplyObject(instance)
 
 	listButton.Connections[#listButton.Connections + 1] = ControlUtil.ConnectActivated(instance, function()
-		if not ctrlHeld then
+		if not ctrlHeld or not list.MultiClickEnabled then
 			ControlUtil.RunCallback("List row callback failed", listButton.Callback)
 		elseif list.MultiClickEnabled then
 			listButton:SetSelected(not listButton.Selected, true)
@@ -137,37 +140,74 @@ function List.clearSelection(list)
 	return true
 end
 
+local function releaseButton(listButton, destroyInstance)
+	local list = listButton.List
+	local instance = listButton.Instance
+
+	if not list or not instance then
+		return false
+	end
+
+	if listButton.Selected then
+		listButton:SetSelected(false, false)
+	end
+
+	ControlUtil.DisconnectAll(listButton.Connections)
+
+	for _, connections in pairs(list.ContextConnections) do
+		local connection = connections[instance]
+
+		if connection then
+			connection:Disconnect()
+			connections[instance] = nil
+		end
+	end
+
+	listButton.SelectAnimation:Cancel()
+	listButton.DeselectAnimation:Cancel()
+	list.Buttons[instance] = nil
+	listButton.Instance = nil
+	listButton.List = nil
+	listButton.Callback = nil
+	listButton.RightCallback = nil
+	listButton.SelectedCallback = nil
+
+	if destroyInstance then
+		instance:Destroy()
+	end
+
+	return true
+end
+
 function List.clear(list)
 	list:ClearSelection()
 	local buttons = {}
 
-	for instance, listButton in pairs(list.Buttons) do
-		buttons[#buttons + 1] = { instance, listButton }
+	for _, listButton in pairs(list.Buttons) do
+		buttons[#buttons + 1] = listButton
 	end
 
-	for _, entry in ipairs(buttons) do
-		local instance = entry[1]
-		local listButton = entry[2]
-		ControlUtil.DisconnectAll(listButton.Connections)
-		list.Buttons[instance] = nil
-
-		if instance and instance.Parent then
-			instance:Destroy()
-		end
+	for _, listButton in ipairs(buttons) do
+		releaseButton(listButton, true)
 	end
 
-	list.Instance.CanvasSize = UDim2.new(0, 0, 0, 15)
+	if list.Instance then
+		list.Instance.CanvasSize = UDim2.new(0, 0, 0, 15)
+	end
+
 	list.RecalculateQueued = false
 end
 
 function List.recalculate(list)
-	local newHeight = 15
-	local selected = list.Selected
+	if list.Destroyed or not list.Instance then
+		return
+	end
 
+	local newHeight = 15
 	local staleInstances = {}
 
 	for instance in pairs(list.Buttons) do
-		if not instance.Parent then
+		if instance.Parent ~= list.Instance then
 			staleInstances[#staleInstances + 1] = instance
 		elseif instance.Visible then
 			newHeight = newHeight + instance.AbsoluteSize.Y + 5
@@ -175,21 +215,7 @@ function List.recalculate(list)
 	end
 
 	for _, instance in ipairs(staleInstances) do
-		list.Buttons[instance] = nil
-	end
-
-	if selected then
-		for index = #selected, 1, -1 do
-			local listButton = selected[index]
-
-			if not listButton.Instance or not listButton.Instance.Parent or not list.Buttons[listButton.Instance] then
-				table.remove(selected, index)
-			end
-		end
-
-		if #selected == 0 then
-			list.Selected = nil
-		end
+		releaseButton(list.Buttons[instance], false)
 	end
 
 	list.Instance.CanvasSize = UDim2.new(0, 0, 0, newHeight)
@@ -197,17 +223,24 @@ function List.recalculate(list)
 end
 
 function List.queueRecalculate(list)
-	if list.BatchDepth > 0 then
-		list.RecalculateQueued = true
-		return
-	end
-
-	if list.RecalculateQueued then
+	if list.Destroyed then
 		return
 	end
 
 	list.RecalculateQueued = true
+
+	if list.BatchDepth > 0 or list.RecalculateScheduled then
+		return
+	end
+
+	list.RecalculateScheduled = true
 	task.defer(function()
+		list.RecalculateScheduled = false
+
+		if list.Destroyed or list.BatchDepth > 0 or not list.RecalculateQueued then
+			return
+		end
+
 		if list.Instance and list.Instance.Parent then
 			list:Recalculate()
 		else
@@ -224,7 +257,6 @@ function List.endBatch(list)
 	list.BatchDepth = math.max((list.BatchDepth or 1) - 1, 0)
 
 	if list.BatchDepth == 0 and list.RecalculateQueued then
-		list.RecalculateQueued = false
 		list:QueueRecalculate()
 	end
 end
@@ -264,11 +296,17 @@ function List.bindContextMenuSelected(list, contextMenu)
 end
 
 function List.destroy(list)
+	if list.Destroyed then
+		return
+	end
+
+	list.Destroyed = true
 	list:Clear()
 	ControlUtil.DisconnectAll(list.ContextConnections)
 	ControlUtil.DisconnectAll(list.Connections)
 	list.ContextConnections = {}
 	list.Connections = {}
+	list.Instance = nil
 	lists[list] = nil
 end
 
@@ -289,6 +327,11 @@ end
 
 function ListButton.setSelected(listButton, selected, notify)
 	local list = listButton.List
+
+	if not list or not listButton.Instance then
+		return false
+	end
+
 	selected = selected == true
 
 	if listButton.Selected == selected then
@@ -321,32 +364,11 @@ end
 
 function ListButton.remove(listButton)
 	local list = listButton.List
-	local instance = listButton.Instance
 
-	if not list or not instance then
+	if not releaseButton(listButton, true) then
 		return false
 	end
 
-	if listButton.Selected then
-		listButton:SetSelected(false, false)
-	end
-
-	ControlUtil.DisconnectAll(listButton.Connections)
-	listButton.Connections = {}
-
-	for _, connections in pairs(list.ContextConnections) do
-		local connection = connections[instance]
-
-		if connection then
-			ControlUtil.DisconnectAll({ connection })
-			connections[instance] = nil
-		end
-	end
-
-	list.Buttons[instance] = nil
-	instance:Destroy()
-	listButton.Instance = nil
-	listButton.List = nil
 	list:QueueRecalculate()
 	return true
 end

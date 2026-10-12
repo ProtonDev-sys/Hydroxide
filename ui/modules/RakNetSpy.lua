@@ -1,9 +1,11 @@
+local ControlUtil = import("ui/ControlUtil")
 local RakNetSpy = {}
 local Methods = import("modules/RakNetSpy")
 local TextViewer = import("ui/controls/TextViewer")
 local ActionPanel = import("ui/controls/ActionPanel")
 local List, ListButton = import("ui/controls/List")
 local Theme = oh.Theme or import("ui/Theme")
+local InspectUtil = import("ui/InspectUtil")
 
 local Base = import("rbxassetid://11389137937").Base
 local Assets = import("rbxassetid://5042114982").RemoteSpy
@@ -183,7 +185,7 @@ local function makeSourceButton(name, text, xOffset, width)
 	button.ZIndex = sourceSwitch.ZIndex + 1
 	button.Parent = sourceSwitch
 	addCorner(button, 3)
-	trackConnection(button.MouseButton1Click:Connect(function()
+	trackConnection(ControlUtil.ConnectActivated(button, function()
 		if selectSource then
 			selectSource(name)
 		end
@@ -384,16 +386,7 @@ local function compactPreview(entry)
 	return table.concat(parts)
 end
 
-local function formatTimestamp(timestamp)
-	if type(timestamp) ~= "number" then
-		return "unknown"
-	end
-
-	local seconds = math.floor(timestamp)
-	local milliseconds = math.floor((timestamp - seconds) * 1000 + 0.5) % 1000
-	local ran, formatted = pcall(os.date, "%Y-%m-%d %H:%M:%S", seconds)
-	return ran and ("%s.%03d local"):format(formatted, milliseconds) or ("%.3f"):format(timestamp)
-end
+local formatTimestamp = InspectUtil.Timestamp
 
 local function describeEntry(entry)
 	local lines = {
@@ -1068,14 +1061,14 @@ local function queueRefresh()
 	task.defer(performRefresh)
 end
 
-trackConnection(sendFilter.MouseButton1Click:Connect(function()
+trackConnection(ControlUtil.ConnectActivated(sendFilter, function()
 	showSend = not showSend
 	sendFilter.Text = showSend and "Send ON" or "Send OFF"
 	sendFilter.TextColor3 = showSend and Theme.Colors.Send or Theme.Colors.TextDisabled
 	queueRefresh()
 end))
 
-trackConnection(receiveFilter.MouseButton1Click:Connect(function()
+trackConnection(ControlUtil.ConnectActivated(receiveFilter, function()
 	showReceive = not showReceive
 	receiveFilter.Text = showReceive and "Receive ON" or "Receive OFF"
 	receiveFilter.TextColor3 = showReceive and Theme.Colors.Receive or Theme.Colors.TextDisabled
@@ -1097,48 +1090,48 @@ trackConnection(ListSearch:GetPropertyChangedSignal("Text"):Connect(function()
 	end)
 end))
 
-trackConnection(ListRefresh.MouseButton1Click:Connect(function()
+trackConnection(ControlUtil.ConnectActivated(ListRefresh, function()
 	queueRefresh()
 	setStatus("Refreshed RakNet packet list")
 end))
 
-trackConnection(LogsBack.MouseButton1Click:Connect(showPacketList))
+trackConnection(ControlUtil.ConnectActivated(LogsBack, showPacketList))
 
-trackConnection(LogsButtons.Ignore.MouseButton1Click:Connect(function()
+trackConnection(ControlUtil.ConnectActivated(LogsButtons.Ignore, function()
 	if not selectedGroup then
 		return
 	end
 
 	local packetId = selectedGroup.PacketId
 	local ignored = Methods.IsPacketIdIgnored(packetId)
-	local ran, result = pcall(Methods.SetPacketIdIgnored, packetId, not ignored)
+	local ran, result, ignoreError = pcall(Methods.SetPacketIdIgnored, packetId, not ignored)
 
-	if not ran then
-		showViewer("RakNet Ignore Failed", safeString(result))
+	if not ran or ignoreError then
+		showViewer("RakNet Ignore Failed", safeString(ignoreError or result))
 	else
 		setStatus((ignored and "Capturing" or "Ignoring") .. " RakNet packet ID " .. safeString(packetId))
 		queueRefresh()
 	end
 end))
 
-trackConnection(LogsButtons.Block.MouseButton1Click:Connect(function()
+trackConnection(ControlUtil.ConnectActivated(LogsButtons.Block, function()
 	if not selectedGroup then
 		return
 	end
 
 	local packetId = selectedGroup.PacketId
 	local blocked = Methods.IsPacketIdBlocked(packetId)
-	local ran, result = pcall(Methods.SetPacketIdBlocked, packetId, not blocked)
+	local ran, result, blockError = pcall(Methods.SetPacketIdBlocked, packetId, not blocked)
 
-	if not ran then
-		showViewer("RakNet Block Failed", safeString(result))
+	if not ran or blockError then
+		showViewer("RakNet Block Failed", safeString(blockError or result))
 	else
 		setStatus((blocked and "Allowing" or "Blocking") .. " RakNet packet ID " .. safeString(packetId))
 		queueRefresh()
 	end
 end))
 
-trackConnection(LogsButtons.Clear.MouseButton1Click:Connect(function()
+trackConnection(ControlUtil.ConnectActivated(LogsButtons.Clear, function()
 	local ran, clearError = pcall(Methods.Clear)
 
 	if not ran then
@@ -1151,11 +1144,11 @@ trackConnection(LogsButtons.Clear.MouseButton1Click:Connect(function()
 	end
 end))
 
-trackConnection(LogsButtons.Conditions.MouseButton1Click:Connect(function()
-	local ran, result = pcall(Methods.SetEnabled, not Methods.Enabled)
+trackConnection(ControlUtil.ConnectActivated(LogsButtons.Conditions, function()
+	local ran, result, captureError = pcall(Methods.SetEnabled, not Methods.Enabled)
 
-	if not ran then
-		showViewer("RakNet Capture Error", safeString(result))
+	if not ran or captureError then
+		showViewer("RakNet Capture Error", safeString(captureError or result))
 	else
 		setStatus(Methods.Enabled and "RakNet capture resumed" or "RakNet capture paused")
 		updateControls()

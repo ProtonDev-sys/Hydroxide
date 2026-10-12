@@ -4,69 +4,81 @@ local function isBuffer(value)
 	return type(value) == "buffer" or typeof(value) == "buffer"
 end
 
-local function tableToString(data, root, indents, seen)
-	local dataType = type(data)
-	local valueType = typeof(data)
-
-	if dataType == "userdata" or valueType ~= dataType or isBuffer(data) then
-		return (valueType == "Instance" and getInstancePath(data)) or userdataValue(data)
-	elseif dataType == "string" then
-		if #(data:gsub("%w", ""):gsub("%s", ""):gsub("%p", "")) > 0 then
-			local success, result = pcall(toUnicode, data)
-			return (success and result) or toString(data)
-		end
-
+local function tableToString(data, root, indents, seen, state)
+	local rawType, valueType = type(data), typeof(data)
+	if rawType == "userdata" or valueType ~= rawType or isBuffer(data) then
+		return valueType == "Instance" and getInstancePath(data) or userdataValue(data)
+	elseif rawType ~= "table" then
+		-- Binary strings must use the same escaped literal path as top-level
+		-- arguments; a failed UTF-8 conversion must never emit raw source.
 		return dataToString(data)
-	elseif dataType == "table" then
-		indents = indents or 1
-		seen = seen or {}
-
-		if seen[data] then
-			return "OH_CYCLIC_PROTECTION"
-		end
-
-		seen[data] = true
-		local parts = { "{\n" }
-		local elements = 0
-		local indent = ("\t"):rep(indents)
-
-		for index, value in pairs(data) do
-			if index == root or value == root then
-				parts[#parts + 1] = ("%sOH_CYCLIC_PROTECTION,\n"):format(indent)
-			else
-				parts[#parts + 1] = ("%s[%s] = %s,\n"):format(
-					indent,
-					tableToString(index, root or data, indents + 1, seen),
-					tableToString(value, root or data, indents + 1, seen)
-				)
-			end
-
-			elements = elements + 1
-		end
-
-		seen[data] = nil
-
-		if elements > 0 then
-			parts[#parts] = parts[#parts]:sub(1, -3)
-			parts[#parts + 1] = "\n" .. ("\t"):rep(indents - 1) .. "}"
-			return table.concat(parts)
-		end
-
-		return "{}"
 	end
 
-	return tostring(data)
+	indents, seen = indents or 1, seen or {}
+	if not state then
+		local settings = oh and oh.Settings or {}
+		local function limit(name, fallback, minimum, maximum)
+			local value = tonumber(settings[name])
+			if not value or value ~= value or value == math.huge or value == -math.huge then
+				value = fallback
+			end
+			return math.max(minimum, math.min(maximum, math.floor(value)))
+		end
+		state = {
+			Entries = 0, Bytes = 0,
+			MaxEntries = limit("MaxGeneratedTableEntries", 256, 8, 5000),
+			MaxDepth = limit("MaxGeneratedTableDepth", 16, 1, 64),
+			MaxBytes = limit("MaxGeneratedOutputBytes", 1048576, 16384, 8388608)
+		}
+	end
+	if seen[data] then
+		return "nil --[[ OH_CYCLIC_PROTECTION ]]"
+	elseif indents > state.MaxDepth then
+		return "nil --[[ table depth limit reached ]]"
+	end
+
+	seen[data] = true
+	local parts, indent = {}, ("\t"):rep(indents)
+	for key, value in next, data do
+		if state.Entries >= state.MaxEntries or state.Bytes >= state.MaxBytes then
+			parts[#parts + 1] = "nil --[[ table serialization limit reached ]]"
+			break
+		end
+		state.Entries = state.Entries + 1
+		local field
+		if rawequal(key, root) or rawequal(value, root) then
+			field = "nil --[[ OH_CYCLIC_PROTECTION ]]"
+		else
+			local keyText = tableToString(key, root or data, indents + 1, seen, state)
+			if keyText:sub(1, 5) == "nil -" then
+				field = "nil --[[ unsupported table key omitted ]]"
+			else
+				local valueText = tableToString(value, root or data, indents + 1, seen, state)
+				field = ("[%s] = %s"):format(keyText, valueText)
+			end
+		end
+		state.Bytes = state.Bytes + #field + #indent + 2
+		if state.Bytes > state.MaxBytes then
+			parts[#parts + 1] = "nil --[[ table serialization limit reached ]]"
+			break
+		end
+		parts[#parts + 1] = field
+	end
+	seen[data] = nil
+	if #parts == 0 then return "{}" end
+	return "{\n" .. indent .. table.concat(parts, ",\n" .. indent)
+		.. "\n" .. ("\t"):rep(indents - 1) .. "}"
 end
 
 local function compareTables(x, y)
-	for index, value in pairs(x) do
-		if value ~= y[index] then
+	for index, value in next, x do
+		if value ~= rawget(y, index) then
 			return false
 		end
 	end
 
-	for index in pairs(y) do
-		if x[index] == nil then
+	for index in next, y do
+		if rawget(x, index) == nil then
 			return false
 		end
 	end
@@ -96,6 +108,9 @@ local function boundedNumber(options, name, fallback, minimum, maximum)
 	local lowerName = name:sub(1, 1):lower() .. name:sub(2)
 	local value = tonumber(options[name] or options[lowerName] or settings[name] or settings[lowerName]) or fallback
 
+	if value ~= value or value == math.huge or value == -math.huge then
+		value = fallback
+	end
 	value = math.floor(value)
 	return math.max(minimum, math.min(maximum, value))
 end
@@ -162,7 +177,7 @@ local function formatValueTree(value, options)
 	local maxEntries = boundedNumber(options, "MaxEntries", 512, 1, 10000)
 	local maxTableEntries = boundedNumber(options, "MaxTableEntries", 256, 1, 5000)
 	local maxOutputBytes = boundedNumber(options, "MaxOutputBytes", 65536, 256, 1048576)
-	local indentText = type(options.Indent) == "string" and options.Indent or "  "
+	local indentText = type(options.Indent) == "string" and options.Indent:sub(1, 16) or "  "
 	local parts = {}
 	local outputBytes = 0
 	local stopped = false

@@ -1,4 +1,5 @@
 local RemoteSpy = {}
+local oh = oh
 local Remote = import("objects/Remote")
 
 local packValues = table.pack or function(...)
@@ -7,24 +8,28 @@ end
 local unpackValues = table.unpack or unpack
 
 local settings = type(oh.Settings) == "table" and oh.Settings or {}
+local function settingNumber(name, fallback, minimum, maximum)
+    local value = tonumber(settings[name])
+    if not value or value ~= value or value == math.huge or value == -math.huge then
+        value = fallback
+    end
+    return math.max(minimum, math.min(maximum, math.floor(value)))
+end
 local captureExecutorCalls = settings.CaptureExecutorCalls ~= false
 local captureCallStacks = settings.CaptureCallStacks ~= false
-local maxStackFrames = math.max(1, math.floor(tonumber(settings.MaxStackFrames) or 24))
-local maxStackCapturesPerSecond = math.max(
-    1,
-    math.min(1000, math.floor(tonumber(settings.MaxStackCapturesPerSecond) or 60))
-)
-local maxRemoteLogs = math.max(1, math.floor(tonumber(settings.MaxRemoteLogs) or 500))
-local maxCapturedBufferBytes = math.max(256, math.floor(tonumber(settings.MaxGeneratedBufferBytes) or 65536))
-local maxCapturedTableEntries = math.max(8, math.floor(tonumber(settings.MaxGeneratedTableEntries) or 256))
-local maxCapturedTableDepth = math.max(1, math.floor(tonumber(settings.MaxGeneratedTableDepth) or 16))
-local maxCapturedBufferPreviewBytes = math.max(16, math.floor(tonumber(settings.MaxHexBytes) or 512))
-local maxRemoteHistoryBytes = math.max(65536, math.floor(tonumber(settings.MaxRemoteHistoryBytes) or 16777216))
+local maxStackFrames = settingNumber("MaxStackFrames", 24, 1, 256)
+local maxStackCapturesPerSecond = settingNumber("MaxStackCapturesPerSecond", 60, 1, 1000)
+local maxRemoteLogs = settingNumber("MaxRemoteLogs", 500, 1, 5000)
+local maxCapturedBufferBytes = settingNumber("MaxGeneratedBufferBytes", 65536, 256, 1048576)
+local maxCapturedTableEntries = settingNumber("MaxGeneratedTableEntries", 256, 8, 5000)
+local maxCapturedTableDepth = settingNumber("MaxGeneratedTableDepth", 16, 1, 64)
+local maxCapturedBufferPreviewBytes = settingNumber("MaxHexBytes", 512, 16, 65536)
+local maxRemoteHistoryBytes = settingNumber("MaxRemoteHistoryBytes", 16777216, 65536, 67108864)
 local maxCapturedCallBytes = math.min(
     maxRemoteHistoryBytes,
-    math.max(4096, math.floor(tonumber(settings.MaxCapturedCallBytes) or 262144))
+    settingNumber("MaxCapturedCallBytes", 262144, 4096, 8388608)
 )
-local maxCapturedArguments = math.max(8, math.min(1024, math.floor(tonumber(settings.MaxCapturedArguments) or 128)))
+local maxCapturedArguments = settingNumber("MaxCapturedArguments", 128, 8, 1024)
 local internalFunctions = setmetatable({}, { __mode = "k" })
 
 local function registerInternal(callback)
@@ -88,18 +93,23 @@ local eventSet = false
 
 oh.Instances[#oh.Instances + 1] = remoteDataEvent
 
+local function safeError(value)
+    local ran, message = pcall(tostring, value)
+    return ran and message:sub(1, 2048) or "<unprintable error>"
+end
+
 local function recordCaptureError(stage, err)
     diagnostics.CaptureErrors = diagnostics.CaptureErrors + 1
     diagnostics.LastCaptureError = {
         Stage = stage,
-        Error = tostring(err)
+        Error = safeError(err)
     }
 end
 
 local function recordHookFailure(stage, err)
     diagnostics.LastHookError = {
         Stage = stage,
-        Error = tostring(err)
+        Error = safeError(err)
     }
 end
 
@@ -150,6 +160,14 @@ local function ensureRemote(instance)
                     pcall(function()
                         destroyingConnection:Disconnect()
                     end)
+                    if not oh.Exited then
+                        for index, tracked in ipairs(oh.Events) do
+                            if tracked == destroyingConnection then
+                                table.remove(oh.Events, index)
+                                break
+                            end
+                        end
+                    end
                     destroyingConnection = nil
                     remote.DestroyingConnection = nil
                 end
@@ -441,208 +459,14 @@ local function safeGetCallStack(offThread)
     return filterCallStack(stack)
 end
 
-local function makeCaptureMarker(kind, detail)
-    return {
-        __hydroxideCaptureMarker = true,
-        Kind = kind,
-        Detail = detail
-    }
-end
-
-local function readBufferPreview(value, length, maximum)
-    if not buffer or type(buffer.readu8) ~= "function" then
-        return nil
-    end
-
-    local shown = math.min(length, maximum or maxCapturedBufferPreviewBytes)
-    local parts = {}
-    local ran = pcall(function()
-        for offset = 0, shown - 1 do
-            parts[offset + 1] = string.char(buffer.readu8(value, offset))
-        end
-    end)
-
-    return ran and table.concat(parts) or nil
-end
-
-local function reserveCaptureBytes(state, amount)
-    amount = math.max(0, math.floor(tonumber(amount) or 0))
-
-    if state.Bytes + amount > maxCapturedCallBytes then
-        state.Replayable = false
-        state.Truncated = true
-        return false
-    end
-
-    state.Bytes = state.Bytes + amount
-    return true
-end
-
-local function addBoundedPreview(marker, value, length, state)
-    local remaining = math.max(0, maxCapturedCallBytes - state.Bytes)
-    local shown = math.min(length, maxCapturedBufferPreviewBytes, remaining)
-
-    if shown > 0 then
-        marker.Preview = readBufferPreview(value, length, shown)
-
-		if marker.Preview then
-			reserveCaptureBytes(state, #marker.Preview)
-		end
-    end
-end
-
-local function snapshotBuffer(value, state)
-    if not buffer
-        or type(buffer.len) ~= "function"
-        or type(buffer.tostring) ~= "function"
-        or type(buffer.fromstring) ~= "function"
-    then
-        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
-        state.Replayable = false
-        return makeCaptureMarker("buffer", "Buffer copy APIs are unavailable")
-    end
-
-    local measured, length = pcall(buffer.len, value)
-
-    if not measured or type(length) ~= "number" then
-        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
-        state.Replayable = false
-        return makeCaptureMarker("buffer", "Buffer length could not be read")
-    elseif length > maxCapturedBufferBytes then
-        diagnostics.BufferSnapshotsTruncated = diagnostics.BufferSnapshotsTruncated + 1
-        state.Replayable = false
-        local marker = makeCaptureMarker(
-            "buffer",
-            ("%d-byte buffer exceeds the %d-byte capture limit"):format(length, maxCapturedBufferBytes)
-        )
-        marker.Size = length
-        addBoundedPreview(marker, value, length, state)
-        return marker
-    elseif not reserveCaptureBytes(state, length) then
-        diagnostics.BufferSnapshotsTruncated = diagnostics.BufferSnapshotsTruncated + 1
-        local marker = makeCaptureMarker(
-            "buffer",
-            ("Aggregate call capture exceeds the %d-byte limit"):format(maxCapturedCallBytes)
-        )
-        marker.Size = length
-        addBoundedPreview(marker, value, length, state)
-        return marker
-    end
-
-    local copied, bytes = pcall(buffer.tostring, value)
-
-    if not copied or type(bytes) ~= "string" or #bytes ~= length then
-        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
-        state.Replayable = false
-        return makeCaptureMarker("buffer", "Buffer contents could not be copied")
-    end
-
-    local rebuilt, snapshot = pcall(buffer.fromstring, bytes)
-
-    if not rebuilt or typeof(snapshot) ~= "buffer" then
-        diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
-        state.Replayable = false
-        return makeCaptureMarker("buffer", "Buffer snapshot could not be created")
-    end
-
-    local measuredSnapshot, snapshotLength = pcall(buffer.len, snapshot)
-
-    if not measuredSnapshot or snapshotLength ~= length then
-		diagnostics.BufferSnapshotFailures = diagnostics.BufferSnapshotFailures + 1
-		state.Replayable = false
-		return makeCaptureMarker("buffer", "Buffer snapshot length did not match the source")
-	end
-
-    diagnostics.BuffersSnapshotted = diagnostics.BuffersSnapshotted + 1
-    return snapshot
-end
-
-local function snapshotPackedValues(values, initialBytes)
-    local state = {
-        Replayable = true,
-        Entries = 0,
-        Bytes = math.max(0, math.floor(tonumber(initialBytes) or 0)),
-        Truncated = false
-    }
-    local seen = setmetatable({}, { __mode = "k" })
-
-    local clone
-    clone = function(value, depth)
-        local valueType = typeof(value)
-
-        if valueType == "buffer" then
-            return snapshotBuffer(value, state)
-        elseif type(value) == "string" then
-			if reserveCaptureBytes(state, #value) then
-				return value
-			end
-
-			local marker = makeCaptureMarker(
-				"string",
-				("Aggregate call capture exceeds the %d-byte limit"):format(maxCapturedCallBytes)
-			)
-			marker.Size = #value
-			local remaining = math.max(0, maxCapturedCallBytes - state.Bytes)
-			local shown = math.min(#value, maxCapturedBufferPreviewBytes, remaining)
-
-			if shown > 0 then
-				marker.Preview = value:sub(1, shown)
-				reserveCaptureBytes(state, #marker.Preview)
-			end
-
-			return marker
-        elseif type(value) ~= "table" then
-            return value
-        elseif seen[value] then
-            return seen[value]
-        elseif depth >= maxCapturedTableDepth then
-            state.Replayable = false
-            return makeCaptureMarker("table", "Nested table exceeds the capture depth limit")
-        end
-
-        local copy = {}
-        seen[value] = copy
-
-        for key, nestedValue in next, value do
-            state.Entries = state.Entries + 1
-
-            if state.Entries > maxCapturedTableEntries then
-                state.Replayable = false
-                copy.__hydroxideCaptureLimit = "Additional entries were omitted by the capture limit"
-                break
-            end
-
-            copy[clone(key, depth + 1)] = clone(nestedValue, depth + 1)
-        end
-
-        return copy
-    end
-
-    local originalCount = type(values) == "table" and (tonumber(values.n) or #values) or 0
-    originalCount = math.max(0, math.floor(originalCount))
-    local count = math.min(originalCount, maxCapturedArguments)
-    local snapshot = { n = count }
-
-    for index = 1, count do
-        snapshot[index] = clone(values[index], 0)
-    end
-
-	if originalCount > count then
-		state.Replayable = false
-		state.Truncated = true
-		snapshot.n = count + 1
-		snapshot[count + 1] = makeCaptureMarker(
-			"arguments",
-			("%d additional arguments were omitted by the capture limit"):format(originalCount - count)
-		)
-	end
-
-	if state.Truncated then
-		diagnostics.CallSnapshotsTruncated = diagnostics.CallSnapshotsTruncated + 1
-	end
-
-    return snapshot, state.Replayable, state.Bytes
-end
+local snapshotPackedValues = import("objects/ValueSnapshot").new({
+    Bytes = maxCapturedCallBytes,
+    Arguments = maxCapturedArguments,
+    BufferBytes = maxCapturedBufferBytes,
+    TableEntries = maxCapturedTableEntries,
+    TableDepth = maxCapturedTableDepth,
+    PreviewBytes = maxCapturedBufferPreviewBytes
+}, diagnostics)
 
 local function buildCall(vargs, capture)
     local stack, stackLimitation = safeGetCallStack(capture.OffThread)
@@ -828,6 +652,9 @@ local function invokeOriginal(original, arguments)
 end
 
 local function runHook(original, method, capture, arguments)
+    if oh.Exited then
+        return invokeOriginal(original, arguments)
+    end
     local instance = arguments[1]
 
     if typeof(instance) ~= "Instance" then
@@ -851,7 +678,7 @@ local function runHook(original, method, capture, arguments)
         blocked, call, remote = safeProcessRemoteCall(instance, method, tailArguments(arguments), capture)
     end
 
-    if blocked then
+    if blocked and not oh.Exited then
         endCapture(capture.Context, instance, method, previous)
 
         if call then
@@ -870,28 +697,30 @@ local function runHook(original, method, capture, arguments)
 
     endCapture(capture.Context, instance, method, previous)
 
-    if call then
-        call.blocked = false
-        call.completed = true
-        call.durationMs = elapsedMilliseconds(started)
-        call.forwarded = results[1] == true
+    if call and not oh.Exited then
+        local finalized, finalizeError = pcall(function()
+            call.blocked = false
+            call.completed = true
+            call.durationMs = elapsedMilliseconds(started)
+            call.forwarded = results[1] == true
 
-        if results[1] then
-            local returns, _, capturedBytes = snapshotPackedValues(tailResults(results), call.capturedBytes)
-            call.returns = returns
-            call.capturedBytes = capturedBytes
-			local dropped = remote:RefreshCallBytes(call)
+            if results[1] then
+                local returns, _, capturedBytes = snapshotPackedValues(tailResults(results), call.capturedBytes)
+                call.returns = returns
+                call.capturedBytes = capturedBytes
+                local dropped = remote:RefreshCallBytes(call)
+                diagnostics.LogsDropped = diagnostics.LogsDropped + dropped
+                diagnostics.CallsForwarded = diagnostics.CallsForwarded + 1
+            else
+                call.error = safeError(results[2])
+                diagnostics.ForwardErrors = diagnostics.ForwardErrors + 1
+            end
 
-			if dropped > 0 then
-				diagnostics.LogsDropped = diagnostics.LogsDropped + dropped
-			end
-            diagnostics.CallsForwarded = diagnostics.CallsForwarded + 1
-        else
-            call.error = tostring(results[2])
-            diagnostics.ForwardErrors = diagnostics.ForwardErrors + 1
+            emitCall(instance, call)
+        end)
+        if not finalized then
+            recordCaptureError("return-capture", finalizeError)
         end
-
-        emitCall(instance, call)
     end
 
     if not results[1] then
@@ -903,6 +732,9 @@ end
 
 local function createDirectHookCallback(targetMethod, offThread)
     local callback = function(original, ...)
+        if oh.Exited then
+            return original(...)
+        end
         local originalThread, callingScript
 
         if offThread then
@@ -1069,6 +901,9 @@ if hookMetaMethod and getNamecallMethod then
     local originalNamecall
     local callback = function(...)
         local arguments = packValues(...)
+        if oh.Exited then
+            return invokeOriginal(originalNamecall, arguments)
+        end
         local methodRan, method = pcall(getNamecallMethod)
 
         if not methodRan then

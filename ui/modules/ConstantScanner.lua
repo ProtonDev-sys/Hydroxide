@@ -1,4 +1,4 @@
-local TextService = game:GetService("TextService")
+local ControlUtil = import("ui/ControlUtil")
 
 local ConstantScanner = {}
 local ClosureSpy = import("modules/ClosureSpy")
@@ -26,9 +26,9 @@ local Search = Query.Search
 local SearchBox = Query.Query
  
 local constantList = List.new(Page.Results.Clip.Content)
-local constantLogs = {}
 local selectedLog 
 local inspectGeneration = 0
+local scanGeneration = 0
 
 local spyClosureContext = ContextMenuButton.new("rbxassetid://4666593447", "Spy Closure")
 local inspectFunctionContext = ContextMenuButton.new("rbxassetid://4800244808", "Inspect Function")
@@ -50,13 +50,22 @@ local function inspectSelectedFunction()
     inspectGeneration = inspectGeneration + 1
     local generation = inspectGeneration
     local log = selectedLog
-    TextViewer.Show("Function Inspector", "Inspecting function metadata, constants, upvalues, protos, environment, and source ...")
+    local function isCurrent()
+        return generation == inspectGeneration and selectedLog == log and Page.Parent ~= nil and Page.Visible
+    end
+    local function cancelInspection()
+        if generation == inspectGeneration then
+            inspectGeneration = inspectGeneration + 1
+        end
+    end
+    TextViewer.Show("Function Inspector", "Inspecting function metadata, constants, upvalues, protos, environment, and source ...", { OnHide = cancelInspection })
 
     task.spawn(function()
         local text
         local inspected, inspectError = pcall(function()
             local function inspect()
                 text = FunctionInspector.DescribeFunction(log.Closure.Data, {
+                    IsAlive = isCurrent,
                     GetPath = function(instance)
                         return getInstancePath(instance)
                     end
@@ -70,10 +79,11 @@ local function inspectSelectedFunction()
             end
         end)
 
-        if generation == inspectGeneration and selectedLog == log then
+        if isCurrent() then
             TextViewer.Show(
                 "Function Inspector",
-                inspected and (text or "No function information was returned.") or ("Function inspection failed:\n" .. tostring(inspectError))
+                inspected and (text or "No function information was returned.") or ("Function inspection failed:\n" .. tostring(inspectError)),
+                { OnHide = cancelInspection }
             )
         end
     end)
@@ -84,7 +94,6 @@ local function addConstant(constant, temporary)
     local index = constant.Index
     local value = constant.Value
     local valueType = type(value)
-    local valueText = toString(value)
 
     if temporary then
         constantLog.ImageColor3 = constants.tempConstantColor
@@ -103,11 +112,6 @@ local function addConstant(constant, temporary)
     constantLog.Index.Text = index
     constantLog.Value.TextColor3 = oh.Constants.Syntax[valueType]
     constantLog.Icon.Image = oh.Constants.Types[valueType]
-
-    -- constantLog.MouseButton1Click:Connect(function()
-    --     selectedConstant = constant
-    --     selectedConstantLog = constantLog
-    -- end)
 
     return constantLog
 end
@@ -145,7 +149,6 @@ function Log.new(closure)
         inspectSelectedFunction()
     end)
 
-    constantLogs[closure.Data] = log
 
     log.Closure = closure
     log.Constants = constants
@@ -153,28 +156,41 @@ function Log.new(closure)
     return log
 end
 
--- UI Functinoality
+-- UI functionality
 local function addConstants()
-    local query = SearchBox.Text
+    local query = SearchBox.Text:match("^%s*(.-)%s*$") or ""
+    if query == "" or (not tonumber(query) and #query <= 1) then
+        MessageBox.Show("Invalid query", "Your query is too short", MessageType.OK)
+        return
+    end
 
-    if query:gsub(' ', '') ~= '' then
-        if not tonumber(query) and query:len() <= 1 then
+    scanGeneration = scanGeneration + 1
+    inspectGeneration = inspectGeneration + 1
+    local generation = scanGeneration
+    selectedLog = nil
+    constantList:Clear()
+    SearchBox.Text = ""
+    local function isCurrent()
+        return generation == scanGeneration and Page.Parent ~= nil and Page.Visible
+    end
+
+    task.spawn(function()
+        local ok, results, cancelled = pcall(Methods.Scan, query, {
+            IsCancelled = function() return not isCurrent() end,
+        })
+        if not isCurrent() or cancelled then return end
+        if not ok then
+            MessageBox.Show("Scan failed", tostring(results), MessageType.OK)
             return
         end
 
-        constantList:Clear()
-        constantLogs = {}
-
-        for _i, closure in pairs(Methods.Scan(query)) do
-            Log.new(closure)
+        local rows = {}
+        for _, closure in pairs(results) do rows[#rows + 1] = closure end
+        local rendered, renderError = ControlUtil.RenderRows(constantList, rows, Log.new, isCurrent)
+        if not rendered and isCurrent() then
+            MessageBox.Show("Scan failed", tostring(renderError), MessageType.OK)
         end
-
-        constantList:Recalculate()
-    else
-        MessageBox.Show("Invalid query", "Your query is too short", MessageType.OK)
-    end
-
-    SearchBox.Text = ''
+    end)
 end
 
 local SpyHook = ClosureSpy.Hook
@@ -252,11 +268,22 @@ getScriptContext:SetCallback(function()
     end
 end)
 
-Search.MouseButton1Click:Connect(addConstants)
+ControlUtil.ConnectActivated(Search, addConstants)
 SearchBox.FocusLost:Connect(function(returned)
     if returned then
         addConstants()
     end
+end)
+
+Page:GetPropertyChangedSignal("Visible"):Connect(function()
+    if not Page.Visible then
+        scanGeneration = scanGeneration + 1
+        inspectGeneration = inspectGeneration + 1
+    end
+end)
+Page.Destroying:Connect(function()
+    scanGeneration = scanGeneration + 1
+    inspectGeneration = inspectGeneration + 1
 end)
 
 return ConstantScanner

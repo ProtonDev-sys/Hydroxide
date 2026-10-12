@@ -10,7 +10,7 @@ local isLClosure = islclosure or is_l_closure or (iscclosure and function(closur
     return not iscclosure(closure)
 end)
 
-assert(getGc and getInfo and getUpvalue and getConstants and isXClosure, "Your exploit is not supported")
+assert((filterGc or getGc) and getInfo and getUpvalue and getConstants, "Hydroxide inspection APIs are unavailable")
 
 local placeholderUserdataConstant = newproxy(false)
 
@@ -67,7 +67,7 @@ local function getLuaClosures()
             local filtered = {}
 
             for _, closure in pairs(closures) do
-                if not isLClosure or isLClosure(closure) then
+                if type(closure) == "function" and (not isLClosure or isLClosure(closure)) then
                     filtered[#filtered + 1] = closure
                 end
             end
@@ -78,10 +78,13 @@ local function getLuaClosures()
 
     local closures = {}
 
-    for _, object in pairs(getGc(false)) do
+    local ran, objects = pcall(function()
+        return getGc and getGc(false)
+    end)
+    for _, object in pairs(ran and type(objects) == "table" and objects or {}) do
         if type(object) == "function"
             and (not isLClosure or isLClosure(object))
-            and not isXClosure(object)
+            and (not isXClosure or not isXClosure(object))
         then
             closures[#closures + 1] = object
         end
@@ -91,6 +94,10 @@ local function getLuaClosures()
 end
 
 local function searchClosure(script, name, upvalueIndex, constants)
+    if type(upvalueIndex) ~= "number" or upvalueIndex < 1 or upvalueIndex == math.huge
+        or upvalueIndex ~= math.floor(upvalueIndex) then
+        return nil
+    end
     for _, closure in pairs(getLuaClosures()) do
         local parentScript = safeGetClosureScript(closure)
         local matchesScript = script == parentScript
@@ -110,12 +117,8 @@ local function searchClosure(script, name, upvalueIndex, constants)
                 hasUpvalue = upvalueRan and upvalue ~= nil
             end
 
-            if hasUpvalue
-                and ((name and name ~= "Unnamed function") and closureName == name)
-                and matchConstants(closure, constants)
-            then
-                return closure
-            elseif hasUpvalue and (not name or name == "Unnamed function") and matchConstants(closure, constants) then
+            if hasUpvalue and (not name or name == "Unnamed function" or closureName == name)
+                and matchConstants(closure, constants) then
                 return closure
             end
         end

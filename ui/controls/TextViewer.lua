@@ -1,3 +1,4 @@
+local ControlUtil = import("ui/ControlUtil")
 local CoreGui = game:GetService("CoreGui")
 local TextService = game:GetService("TextService")
 local UserInput = game:GetService("UserInputService")
@@ -455,7 +456,14 @@ local function makeViewer(parent, sourceDock, pages)
 		local wasVisible = current.Overlay.Visible
 		cancelSplitDrag()
 		disconnectActionConnections()
+
+		if not wasVisible then
+			return
+		end
+
 		current.Overlay.Visible = false
+		current.CopyText = ""
+		current.TextBox.Text = ""
 
 		if not current.Embedded then
 			current.Dock.Visible = false
@@ -477,13 +485,13 @@ local function makeViewer(parent, sourceDock, pages)
 		end
 	end
 
-	trackConnection(copy.MouseButton1Click:Connect(function()
+	trackConnection(ControlUtil.ConnectActivated(copy, function()
 		if setClipboard then
 			setClipboard(current.CopyText)
 		end
 	end))
 
-	trackConnection(hide.MouseButton1Click:Connect(function()
+	trackConnection(ControlUtil.ConnectActivated(hide, function()
 		current.Hide()
 	end))
 
@@ -597,9 +605,14 @@ function TextViewer.Show(title, text, options)
 
 	local settings = oh and oh.Settings or {}
 	local maxBytes = tonumber(options.MaxBytes or settings.MaxInspectorBytes or settings.maxInspectorBytes) or 524288
+	if maxBytes ~= maxBytes or math.abs(maxBytes) == math.huge then
+		maxBytes = 524288
+	end
+	maxBytes = math.max(1, math.min(8388608, math.floor(maxBytes)))
 
-	if maxBytes > 0 and #text > maxBytes then
-		text = text:sub(1, maxBytes) .. ("\n\n-- ... inspector output truncated at %d bytes ..."):format(maxBytes)
+	if #text > maxBytes then
+		local marker = ("\n\n-- ... inspector output truncated at %d bytes ..."):format(maxBytes):sub(1, maxBytes)
+		text = text:sub(1, maxBytes - #marker) .. marker
 	end
 
 	local current = ensureViewer(options.Parent)
@@ -641,7 +654,7 @@ function TextViewer.Show(title, text, options)
 			actionButton.LayoutOrder = actionIndex
 			actionButton.Size = UDim2.new(0, actionWidth, 0, ACTION_BUTTON_HEIGHT)
 			current.ActionWidths[actionIndex] = actionWidth
-			current.ActionConnections[#current.ActionConnections + 1] = actionButton.MouseButton1Click:Connect(
+			current.ActionConnections[#current.ActionConnections + 1] = ControlUtil.ConnectActivated(actionButton,
 				function()
 					action.Callback(current)
 				end

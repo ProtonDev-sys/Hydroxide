@@ -43,8 +43,15 @@ _G.decompile = function(target)
     return "-- instance source"
 end
 
-local LocalScript = dofile(root .. "objects/LocalScript.lua")
-local ModuleScript = dofile(root .. "objects/ModuleScript.lua")
+local imports = {}
+_G.import = function(path)
+    if not imports[path] then
+        imports[path] = dofile(root .. path .. ".lua")
+    end
+    return imports[path]
+end
+local LocalScript = import("objects/LocalScript")
+local ModuleScript = import("objects/ModuleScript")
 local localInstance = {}
 local moduleInstance = {}
 local localModel = LocalScript.new(localInstance)
@@ -318,18 +325,8 @@ end
 _G.getScripts = function()
     error("getscripts must not change running/loaded scanner semantics")
 end
-_G.import = function(path)
-    if path == "objects/LocalScript" then
-        return LocalScript
-    elseif path == "objects/ModuleScript" then
-        return ModuleScript
-    end
-
-    error("unexpected import: " .. tostring(path))
-end
-
-local ScriptScanner = dofile(root .. "modules/ScriptScanner.lua")
-local ModuleScanner = dofile(root .. "modules/ModuleScanner.lua")
+local ScriptScanner = import("modules/ScriptScanner")
+local ModuleScanner = import("modules/ModuleScanner")
 local scriptResults = ScriptScanner.Scan("running")
 local moduleResults = ModuleScanner.Scan("loaded")
 
@@ -358,15 +355,13 @@ _G.getLoadedModules = function()
     return manyModules
 end
 
-local cancellationChecks = 0
 local enumeratedCount = 0
 local cancelledTotal, wasCancelled = ModuleScanner.Enumerate("", function()
     enumeratedCount = enumeratedCount + 1
 end, {
     YieldEvery = 16,
     IsCancelled = function()
-        cancellationChecks = cancellationChecks + 1
-        return cancellationChecks > 1
+        return enumeratedCount >= 16
     end
 })
 assertEqual(wasCancelled, true, "module enumeration is cancellable between batches")
@@ -386,5 +381,253 @@ end
 local modulesOk, modulesError = pcall(ModuleScanner.Enumerate, "")
 assertEqual(modulesOk, false, "module enumeration rejects non-table API results")
 assert(tostring(modulesError):find("did not return a table", 1, true), "module failure explains the invalid result")
+
+local function verifyModelRegressions(Model, label)
+    local environment = { retained = true }
+    local closureCalls = 0
+    _G.getScriptClosure = function()
+        closureCalls = closureCalls + 1
+        return scriptClosure
+    end
+    _G.getSenv = function() return environment end
+    _G.getMenv = nil
+    _G.getConstants = function() return { [1] = false, [3] = "sparse constant" } end
+    _G.getProtos = function() return { [3] = scriptClosure } end
+
+    local seeded = Model.new({}, scriptClosure, environment)
+    assertEqual(seeded:LoadClosure(), scriptClosure, label .. " preserves seeded closure")
+    assertEqual(seeded:LoadEnvironment(), environment, label .. " preserves seeded environment")
+    assertEqual(closureCalls, 0, label .. " seeded values do not trigger reads")
+    local invalidSeed = Model.new({}, false, "invalid environment")
+    assertEqual(invalidSeed:LoadClosure(), scriptClosure, label .. " validates seeded closure type")
+    assertEqual(invalidSeed:LoadEnvironment(), environment, label .. " validates seeded environment type")
+    assertEqual(invalidSeed:LoadConstants()[1], false, label .. " preserves false constants")
+    assertEqual(invalidSeed.Constants[3], "sparse constant", label .. " preserves sparse constant indices")
+    assertEqual(invalidSeed:LoadProtos()[3], scriptClosure, label .. " preserves proto indices")
+    for public, exported in pairs({
+        LoadClosure = "loadClosure", LoadEnvironment = "loadEnvironment", LoadConstants = "loadConstants",
+        LoadProtos = "loadProtos", Decompile = "decompile", ClearFunctionSourceCache = "clearFunctionSourceCache"
+    }) do
+        assertEqual(invalidSeed[public], Model[exported], label .. " preserves " .. public .. " alias")
+    end
+
+    _G.decompile = function() return string.rep("x", 4096) end
+    local refreshed = Model.new({})
+    refreshed:Decompile(nil, 1024)
+    local refreshCalls = 0
+    _G.decompile = function()
+        refreshCalls = refreshCalls + 1
+        return nil, "decompiler unavailable"
+    end
+    local source, message = refreshed:Decompile(nil, 2048)
+    assertEqual(source, nil, label .. " failed larger refresh returns no source")
+    assertEqual(message, "decompiler unavailable", label .. " retains decompiler detail")
+    assertEqual(refreshed.Source, nil, label .. " failed refresh clears stale source")
+    assertEqual(refreshed:Decompile(nil, 4096), nil, label .. " cached failure does not resurrect old source")
+    assertEqual(refreshCalls, 2, label .. " failed instance and closure results are cached")
+
+    local target = function() end
+    local errorCalls = 0
+    _G.decompile = function()
+        errorCalls = errorCalls + 1
+        return nil, string.rep("error", 20000)
+    end
+    local failed = Model.new({})
+    local _, boundedError = failed:Decompile(target, 1024)
+    assert(#boundedError <= 2048, label .. " bounds retained decompiler errors")
+    failed:Decompile(target, 4096)
+    assertEqual(errorCalls, 1, label .. " does not retry a cached failure for a larger limit")
+    _G.decompile = function()
+        error(setmetatable({}, { __tostring = function() error("cannot format") end }), 0)
+    end
+    local _, unprintableError = Model.new({}):Decompile(target)
+    assertEqual(unprintableError, "Unable to format inspector error", label .. " safely handles unprintable errors")
+
+    _G.decompile = function() return string.rep("\226\130\172", 2000) end
+    local unicodeSource = Model.new({}):Decompile(nil, 1024)
+    assert(#unicodeSource <= 1024 and utf8.len(unicodeSource), label .. " truncates at a UTF-8 boundary")
+    _G.oh = { Settings = { MaxInspectorBytes = 1024, MaxFunctionSourceCacheEntries = 0 / 0, MaxFunctionSourceCacheBytes = 0 / 0 } }
+    _G.decompile = function() return string.rep("x", 4096) end
+    assertEqual(#Model.new({}):Decompile(target, 0 / 0), 1024, label .. " NaN limits use configured defaults")
+    _G.oh = nil
+
+    local cleared = Model.new({})
+    _G.decompile = function()
+        cleared:ClearFunctionSourceCache()
+        return "-- completed after cache clear"
+    end
+    assertEqual(cleared:Decompile(target), "-- completed after cache clear", label .. " returns completed work to its caller")
+    assertEqual(cleared.FunctionSources[target], nil, label .. " late work does not repopulate a cleared cache")
+    assertEqual(cleared.FunctionSourceBytes, 0, label .. " late work reserves no cache bytes")
+    cleared.FunctionSourceOrder[1] = target
+    cleared:ClearFunctionSourceCache()
+    assertEqual(#cleared.FunctionSourceOrder, 0, label .. " clears stale order entries without looping")
+
+    for _, functionTarget in ipairs({ false, true }) do
+        local concurrent = Model.new({})
+        local requestedTarget = functionTarget and target or nil
+        local first = true
+        _G.decompile = function()
+            if first then
+                first = false
+                coroutine.yield()
+            end
+            return string.rep("s", 3000)
+        end
+        local pending = coroutine.create(function() return concurrent:Decompile(requestedTarget, 1024) end)
+        assert(coroutine.resume(pending))
+        concurrent:Decompile(requestedTarget, 4096)
+        assert(coroutine.resume(pending))
+        local retained = functionTarget and concurrent.FunctionSources[target].Source or concurrent.Source
+        assertEqual(#retained, 3000, label .. " smaller late request cannot downgrade retained source")
+    end
+
+    local closed = Model.new({})
+    _G.decompile = function()
+        closed:Destroy()
+        return "-- completed after close"
+    end
+    local closedSource, closedError = closed:Decompile(target)
+    assertEqual(closedSource, nil, label .. " rejects results after destruction")
+    assertEqual(closedError, "Script inspector has been closed", label .. " explains closed inspector")
+    assertEqual(closed.Instance, nil, label .. " destruction releases instance")
+    assertEqual(next(closed.FunctionSources), nil, label .. " destruction retains no function sources")
+    closed:Destroy()
+    assertEqual(closed:LoadClosure(), nil, label .. " destroyed model cannot reload resources")
+
+    local closedEnvironment = Model.new({})
+    _G.getSenv = function()
+        closedEnvironment:Destroy()
+        return environment
+    end
+    assertEqual(closedEnvironment:LoadEnvironment(), nil, label .. " rejects environment completing after close")
+    assertEqual(closedEnvironment.Environment, nil, label .. " releases late environment result")
+end
+
+verifyModelRegressions(LocalScript, "local model")
+verifyModelRegressions(ModuleScript, "module model")
+
+local function newBudget()
+    local budget = { Entries = 0, Tokens = {} }
+    function budget:Reserve(_bytes, evict)
+        local token = { Owner = self, Active = true, Evict = evict }
+        self.Tokens[#self.Tokens + 1] = token
+        self.Entries = self.Entries + 1
+        return token
+    end
+    function budget:Release(token, evict)
+        assertEqual(token.Owner, self, "cache token is released to its original owner")
+        if token.Active then
+            token.Active = false
+            self.Entries = self.Entries - 1
+            local callback = token.Evict
+            token.Evict = nil
+            if evict and callback then callback() end
+        end
+    end
+    return budget
+end
+
+do
+    local originalBudget, replacementBudget = newBudget(), newBudget()
+    _G.oh = { Settings = {}, FunctionSourceCache = originalBudget }
+    _G.decompile = function() return "-- retained source" end
+    local first, second = LocalScript.new({}), ModuleScript.new({})
+    local target = function() end
+    first:Decompile(target)
+    second:Decompile(target)
+    oh.FunctionSourceCache = replacementBudget
+    first:Destroy()
+    assertEqual(originalBudget.Entries, 1, "destroy releases only its own model cache")
+    assertEqual(second.FunctionSources[target].Source, "-- retained source", "neighboring model is preserved")
+    second:ClearFunctionSourceCache()
+    assertEqual(originalBudget.Entries, 0, "cleanup releases the reserving session budget")
+    assertEqual(replacementBudget.Entries, 0, "cleanup does not alter a replacement session")
+
+    local abandoned = LocalScript.new({})
+    abandoned:Decompile(target)
+    local weakOwner = setmetatable({ abandoned }, { __mode = "v" })
+    abandoned = nil
+    collectgarbage("collect")
+    collectgarbage("collect")
+    assertEqual(weakOwner[1], nil, "shared budget does not retain an abandoned model")
+    replacementBudget:Release(replacementBudget.Tokens[1], true)
+    _G.oh = nil
+end
+
+for _, Model in ipairs({ LocalScript, ModuleScript }) do
+    local originalBudget, replacementBudget = newBudget(), newBudget()
+    local originalRuntime = { Settings = { MaxInspectorBytes = 1024 }, FunctionSourceCache = originalBudget }
+    local replacementRuntime = { Settings = { MaxInspectorBytes = 4096 }, FunctionSourceCache = replacementBudget }
+    _G.oh = originalRuntime
+    local model = Model.new({})
+    _G.oh = replacementRuntime
+    _G.decompile = function() return string.rep("x", 4096) end
+    local target = function() end
+    assertEqual(#model:Decompile(target), 1024, "model retains its owning runtime limits")
+    assertEqual(originalBudget.Entries, 1, "model reserves only its owning runtime budget")
+    assertEqual(replacementBudget.Entries, 0, "old model leaves replacement budget untouched")
+    originalRuntime.Exited = true
+    assertEqual(model:Decompile(target), nil, "cached values cannot reopen an exited session")
+    assertEqual(originalBudget.Entries, 0, "closed owner releases model resources on access")
+
+    originalRuntime.Exited = false
+    _G.oh = originalRuntime
+    local pendingModel = Model.new({})
+    _G.decompile = function()
+        coroutine.yield()
+        return "-- decompiler completed after session exit"
+    end
+    local pendingResult
+    local pending = coroutine.create(function() pendingResult = pendingModel:Decompile(target) end)
+    assert(coroutine.resume(pending))
+    originalRuntime.Exited = true
+    _G.oh = replacementRuntime
+    assert(coroutine.resume(pending))
+    assertEqual(pendingResult, nil, "in-flight decompile is discarded after owner exits")
+    assertEqual(pendingModel._Destroyed, true, "late access disposes an exited owner's model")
+    assertEqual(originalBudget.Entries, 0, "late result does not reserve old budget")
+    assertEqual(replacementBudget.Entries, 0, "late result does not reserve replacement budget")
+    _G.oh = nil
+end
+
+do
+    local cancelled = false
+    _G.getLoadedModules = function()
+        cancelled = true
+        return manyModules
+    end
+    local delivered = 0
+    local total, stopped = ModuleScanner.Enumerate("", function() delivered = delivered + 1 end, {
+        IsCancelled = function() return cancelled end
+    })
+    assertEqual(total, 0, "cancelled provider result is discarded before rows are delivered")
+    assertEqual(stopped, true, "provider-time cancellation is reported")
+    assertEqual(delivered, 0, "cancelled provider does not invoke consumers")
+
+    cancelled = false
+    _G.getLoadedModules = function() return { manyModules[1] } end
+    total, stopped = ModuleScanner.Enumerate("", function() cancelled = true end, {
+        IsCancelled = function() return cancelled end
+    })
+    assertEqual(total, 1, "partial-batch cancellation preserves completed count")
+    assertEqual(stopped, true, "cancellation in final partial batch is reported")
+
+    local visits, waits = 0, 0
+    _G.task = { wait = function() waits = waits + 1 end }
+    local Scanner = import("modules/Scanner")
+    local checkpoint = Scanner.checkpoint({ YieldEvery = 0 / 0 })
+    for _ = 1, 128 do checkpoint() end
+    assertEqual(waits, 1, "NaN scan intervals preserve default yielding")
+    checkpoint = Scanner.checkpoint({ YieldEvery = math.huge })
+    for _ = 1, 4096 do checkpoint() end
+    assertEqual(waits, 2, "infinite scan intervals remain bounded")
+    checkpoint = Scanner.checkpoint({ YieldEvery = 16, Yield = false, IsCancelled = function() return visits >= 16 end })
+    assertEqual(checkpoint(true), false, "checkpoint supports a check without advancing work")
+    for _ = 1, 16 do visits = visits + 1; stopped = checkpoint() end
+    assertEqual(stopped, true, "non-yielding scans still honor cancellation")
+    assertEqual(waits, 2, "Yield=false does not call task.wait")
+    _G.task = nil
+end
 
 print("scanner_spec.lua: ok")

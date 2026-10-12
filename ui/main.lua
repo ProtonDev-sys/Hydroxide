@@ -98,6 +98,7 @@ local initialized, initializationError = xpcall(function()
 	if prefetch then
 		local prefetched, prefetchErrors = prefetch({
 			"ui/ControlUtil",
+			"ui/InspectUtil",
 			"ui/controls/TabSelector",
 			"ui/controls/MessageBox",
 			"ui/controls/Prompt",
@@ -129,6 +130,11 @@ local initialized, initializationError = xpcall(function()
 			"objects/Upvalue",
 			"objects/Constant",
 			"methods/scriptbuilder",
+			"objects/LogBuffer",
+			"objects/ArgumentFilter",
+			"objects/ValueSnapshot",
+			"objects/ScriptModel",
+			"modules/Scanner",
 		})
 
 		if not prefetched and type(warn) == "function" then

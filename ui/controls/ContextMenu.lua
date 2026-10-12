@@ -15,6 +15,11 @@ local currentContextMenu
 local BODY_FONT = Enum.Font.SourceSans
 local textConstraint = Vector2.new(1337420, Theme.Metrics.ControlHeight)
 
+local function menuViewport()
+	local viewport = Storage:IsA("GuiObject") and Storage.AbsoluteSize or ControlUtil.GetScreenSize()
+	return viewport.X > 0 and viewport.Y > 0 and viewport or ControlUtil.GetScreenSize()
+end
+
 local function hideCurrent()
 	local contextMenu = currentContextMenu
 	currentContextMenu = nil
@@ -154,6 +159,33 @@ function ContextMenu.new(contextMenuButtons)
 	local instance = Assets.ContextMenu:Clone()
 	instance.Parent = Storage
 	instance.Visible = false
+	local list = instance.List
+
+	if not list:IsA("ScrollingFrame") then
+		local scroller = Instance.new("ScrollingFrame")
+		scroller.Name = "List"
+		scroller.Position = list.Position
+		scroller.Size = list.Size
+		scroller.AnchorPoint = list.AnchorPoint
+		scroller.BackgroundTransparency = list.BackgroundTransparency
+		scroller.BackgroundColor3 = list.BackgroundColor3
+		scroller.BorderSizePixel = list.BorderSizePixel
+		scroller.ZIndex = list.ZIndex
+
+		for _, child in ipairs(list:GetChildren()) do
+			child.Parent = scroller
+		end
+
+		list:Destroy()
+		scroller.Parent = instance
+		list = scroller
+	end
+
+	list.Active = true
+	list.ClipsDescendants = true
+	list.ScrollingDirection = Enum.ScrollingDirection.Y
+	list.ScrollBarImageColor3 = Theme.Colors.Scrollbar
+	list.CanvasSize = UDim2.new()
 	Theme.Apply(instance)
 
 	local contextMenu = {
@@ -222,6 +254,11 @@ function ContextMenu.recalculate(contextMenu)
 
 		if buttonInstance and buttonInstance.Parent and buttonInstance.Visible then
 			local text = label and label.Text or ""
+
+			if label then
+				label.TextTruncate = Enum.TextTruncate.AtEnd
+			end
+
 			local textWidth = TextService:GetTextSize(
 				text,
 				Theme.Typography.BodyTextSize,
@@ -237,7 +274,17 @@ function ContextMenu.recalculate(contextMenu)
 		end
 	end
 
-	contextMenu.Instance.Size = UDim2.new(0, math.ceil(width), 0, math.max(1, height))
+	local viewport = menuViewport()
+	local maximumWidth = math.max(1, viewport.X - Theme.Metrics.PopupMargin * 2)
+	local maximumHeight = math.max(1, viewport.Y - Theme.Metrics.PopupMargin * 2)
+	local overflow = height > maximumHeight
+	local list = contextMenu.Instance.List
+	list.ScrollBarThickness = overflow and Theme.Metrics.ScrollbarThickness or 0
+	list.CanvasSize = UDim2.new(0, 0, 0, height)
+	contextMenu.Instance.Size = UDim2.new(
+		0, math.min(maximumWidth, math.ceil(width) + list.ScrollBarThickness),
+		0, math.max(1, math.min(maximumHeight, height))
+	)
 end
 
 function ContextMenu.show(contextMenu, position)
@@ -250,11 +297,7 @@ function ContextMenu.show(contextMenu, position)
 	local instance = contextMenu.Instance
 	local pointer = position and Vector2.new(position.X, position.Y) or ControlUtil.GetPointerPosition()
 	local storagePosition = Storage:IsA("GuiObject") and Storage.AbsolutePosition or Vector2.new()
-	local viewport = Storage:IsA("GuiObject") and Storage.AbsoluteSize or ControlUtil.GetScreenSize()
-
-	if viewport.X <= 0 or viewport.Y <= 0 then
-		viewport = ControlUtil.GetScreenSize()
-	end
+	local viewport = menuViewport()
 	local x, y = ControlUtil.ClampPopupPosition(
 		pointer.X - storagePosition.X,
 		pointer.Y - storagePosition.Y,
@@ -266,6 +309,7 @@ function ContextMenu.show(contextMenu, position)
 	)
 
 	instance.Position = UDim2.new(0, x, 0, y)
+	instance.List.CanvasPosition = Vector2.new()
 	instance.Visible = true
 	contextMenu.Visible = true
 	currentContextMenu = contextMenu

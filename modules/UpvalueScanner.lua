@@ -1,6 +1,7 @@
 local UpvalueScanner = {}
 local Closure = import("objects/Closure")
 local Upvalue = import("objects/Upvalue")
+local checkpoint = import("modules/Scanner").checkpoint
 
 local requiredMethods = {
     ["getLuaClosures"] = true,
@@ -12,7 +13,8 @@ local requiredMethods = {
 
 local function getClosureName(closure)
     local ran, info = pcall(getInfo, closure, "n")
-    return ran and info and info.name or ""
+    local name = ran and type(info) == "table" and info.name
+    return type(name) == "string" and name or ""
 end
 
 local function compareUpvalue(query, loweredQuery, upvalue, ignoreNumberMatch)
@@ -27,12 +29,14 @@ local function compareUpvalue(query, loweredQuery, upvalue, ignoreNumberMatch)
     elseif upvalueType == "boolean" then
         return tostring(upvalue) == loweredQuery
     elseif upvalueType == "userdata" then
-        if typeof(upvalue) == "Instance" then
-            local instanceName = upvalue.Name
-            return instanceName == query or instanceName:lower():find(loweredQuery, 1, true) ~= nil
-        end
-
-        return toString(upvalue) == query
+        local ran, matches = pcall(function()
+            if typeof(upvalue) == "Instance" then
+                local name = upvalue.Name
+                return name == query or name:lower():find(loweredQuery, 1, true) ~= nil
+            end
+            return toString(upvalue) == query
+        end)
+        return ran and matches
     elseif upvalueType == "function" then
         local closureName = getClosureName(upvalue)
         local loweredName = closureName:lower()
@@ -43,16 +47,39 @@ local function compareUpvalue(query, loweredQuery, upvalue, ignoreNumberMatch)
     return false
 end
 
-local function scan(query, deepSearch)
+local function scan(query, deepSearch, options)
     local upvalues = {}
-    query = query or ""
+    query = tostring(query or "")
     local loweredQuery = query:lower()
+    local cancelled = checkpoint(options)
+    if cancelled(true) then
+        return upvalues, true
+    end
+    local closures = getLuaClosures()
+    assert(type(closures) == "table", "getLuaClosures did not return a table")
+    if cancelled(true) then
+        return upvalues, true
+    end
+    local seen = {}
 
-    for _, closure in pairs(getLuaClosures()) do
-        local ran, closureUpvalues = pcall(getUpvalues, closure)
+    for _, closure in next, closures do
+        if cancelled() then
+            return upvalues, true
+        end
+        local ran, closureUpvalues = false, nil
+        if type(closure) == "function" and not seen[closure] then
+            seen[closure] = true
+            ran, closureUpvalues = pcall(getUpvalues, closure)
+        end
+        if cancelled(true) then
+            return upvalues, true
+        end
 
         if ran and type(closureUpvalues) == "table" then
-            for index, value in pairs(closureUpvalues) do
+            for index, value in next, closureUpvalues do
+                if cancelled() then
+                    return upvalues, true
+                end
                 local valueType = type(value)
 
                 if valueType ~= "table" and compareUpvalue(query, loweredQuery, value) then
@@ -60,6 +87,8 @@ local function scan(query, deepSearch)
 
                     if not storage then
                         storage = Closure.new(closure)
+                        storage.Upvalues = {}
+                        storage.TemporaryUpvalues = {}
                         upvalues[closure] = storage
                     end
 
@@ -68,7 +97,10 @@ local function scan(query, deepSearch)
                     local storage = upvalues[closure]
                     local tableUpvalue
 
-                    for key, nestedValue in pairs(value) do
+                    for key, nestedValue in next, value do
+                        if cancelled() then
+                            return upvalues, true
+                        end
                         if (key ~= value and nestedValue ~= value)
                             and (
                                 compareUpvalue(query, loweredQuery, key, true)
@@ -77,6 +109,8 @@ local function scan(query, deepSearch)
                         then
                             if not storage then
                                 storage = Closure.new(closure)
+                                storage.Upvalues = {}
+                                storage.TemporaryUpvalues = {}
                                 upvalues[closure] = storage
                             end
 
@@ -94,7 +128,7 @@ local function scan(query, deepSearch)
         end
     end
 
-    return upvalues
+    return upvalues, cancelled(true)
 end
 
 UpvalueScanner.Scan = scan

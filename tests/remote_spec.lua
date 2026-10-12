@@ -1,6 +1,10 @@
 local root = (arg and arg[0] and arg[0]:match("^(.*[/\\])tests[/\\][^/\\]+$")) or ""
 assert(root, "unable to locate repository root")
 
+_G.import = function(path)
+    return dofile(root .. path .. ".lua")
+end
+
 local function assertEqual(actual, expected, label)
     if actual ~= expected then
         error(("%s: expected %s, got %s"):format(label, tostring(expected), tostring(actual)), 2)
@@ -65,6 +69,14 @@ byteBoundRemote:IncrementCalls({ id = "B", capturedBytes = 2 })
 assertEqual(#byteBoundRemote.Logs, 1, "remote history byte budget evicts the oldest call")
 assertEqual(byteBoundRemote.Logs[1].id, "B", "remote history byte budget retains the newest call")
 assertEqual(byteBoundRemote.HistoryBytes, 2, "remote history byte accounting is bounded")
+local retained = byteBoundRemote.Logs[1]
+byteBoundRemote:IncrementCalls({ capturedBytes = 4 })
+assertEqual(#byteBoundRemote.Logs, 1, "oversized entry cannot defeat the byte budget")
+assertEqual(byteBoundRemote.Logs[1], retained, "rejecting oversized entries preserves retained history")
+retained.capturedBytes = 4
+byteBoundRemote:RefreshCallBytes(retained)
+assertEqual(#byteBoundRemote.Logs, 0, "oversized return refresh releases the last over-budget entry")
+assertEqual(byteBoundRemote.HistoryBytes, 0, "oversized refresh keeps byte accounting exact")
 
 remote:DecrementCalls(second)
 assertEqual(#remote.Logs, 1, "circular history removes a logical entry")
@@ -91,6 +103,10 @@ local matchingBuffer = fakeBuffer.fromstring("A\0B")
 assertEqual(conditionRemote:BlockArg(3, expectedBuffer, false), true, "buffer value condition added")
 assertEqual(conditionRemote:BlockArg(3, expectedBuffer, false), false, "duplicate condition rejected")
 assertEqual(conditionRemote:BlockArg(0, "string", true), false, "invalid condition index rejected")
+assertEqual(conditionRemote:BlockArg(5, false, true), false, "false is not a condition type name")
+assertEqual(conditionRemote.BlockedArgs[5], nil, "invalid conditions leave no empty filter behind")
+assertEqual(conditionRemote:AreArgsBlocked({ n = 1000000000, [1] = true, [2] = 2 }), false,
+    "sparse argument matching visits configured conditions rather than a declared argument range")
 assertEqual(conditionRemote:AreArgsBlocked({ n = 1 }), true, "exact nil condition matches packed nil")
 assertEqual(conditionRemote:AreArgsBlocked({ n = 2, [1] = true, [2] = 0 / 0 }), true, "NaN condition matches")
 assertEqual(
@@ -128,8 +144,15 @@ do
     classMethods.UnreliableRemoteEvent.FireServer = function()
         originalCalls = originalCalls + 1
     end
-    classMethods.RemoteFunction.InvokeServer = function()
+    local hostileReturn = {}
+    local hostileError = setmetatable({}, { __tostring = function() error("error formatting failed") end })
+    classMethods.RemoteFunction.InvokeServer = function(_, request)
         originalCalls = originalCalls + 1
+        if request == "hostile-return" then
+            return hostileReturn, nil, "tail"
+        elseif request == "hostile-error" then
+            error(hostileError)
+        end
         return "remote-function-result"
     end
     classMethods.BindableEvent.Fire = function(instance, ...)
@@ -188,6 +211,9 @@ do
     end
 
     _G.typeof = function(value)
+        if value == hostileReturn then
+            error("return capture failed")
+        end
         if type(value) == "table" and value.__instance then
             return "Instance"
         elseif type(value) == "table" and value.__type then
@@ -225,8 +251,7 @@ do
         }
     }
     _G.import = function(path)
-        assertEqual(path, "objects/Remote", "RemoteSpy import")
-        return Remote
+        return path == "objects/Remote" and Remote or dofile(root .. path .. ".lua")
     end
     _G.checkCaller = function()
         return false
@@ -469,9 +494,29 @@ do
     assertEqual(invokeResult, "remote-function-result", "RemoteFunction result preserved")
     assertEqual(RemoteSpy.CurrentRemotes[remoteFunction].TotalCalls, 1, "RemoteFunction captured")
 
+    local failuresBeforeReturn = RemoteSpy.Diagnostics.CaptureErrors
+    local returned, nilReturn, tailReturn = namecallWrapper(remoteFunction, "hostile-return")
+    assertEqual(returned, hostileReturn, "return-capture failure preserves the original value")
+    assertEqual(nilReturn, nil, "return-capture failure preserves nil slots")
+    assertEqual(tailReturn, "tail", "return-capture failure preserves trailing values")
+    assertEqual(RemoteSpy.Diagnostics.CaptureErrors, failuresBeforeReturn + 1, "return-capture failure is diagnosed")
+    local ok, failure = pcall(namecallWrapper, remoteFunction, "hostile-error")
+    assertEqual(ok, false, "original failure remains a failure")
+    assertEqual(failure, hostileError, "unprintable original errors preserve object identity")
+
+    local trackedBeforeDestroy = #oh.Events
     event:Destroy()
     assertEqual(RemoteSpy.CurrentRemotes[event], nil, "destroyed remotes are released from backend history")
     assertEqual(RemoteSpy.Diagnostics.RemotesDisposed, 1, "destroyed remote cleanup is diagnosed")
+    assertEqual(#oh.Events, trackedBeforeDestroy - 1, "destroyed remotes release their tracked connection")
+
+    local capturedRuntime = oh
+    capturedRuntime.Exited = true
+    _G.oh = { Settings = {}, Hooks = {}, Events = {} }
+    local beforeExitCall = RemoteSpy.Diagnostics.CallsCaptured
+    local resultAfterExit = namecallWrapper(remoteFunction, "after-exit")
+    assertEqual(resultAfterExit, "remote-function-result", "old callbacks pass through after exit")
+    assertEqual(RemoteSpy.Diagnostics.CallsCaptured, beforeExitCall, "old callbacks do not capture into a replacement runtime")
 
     print("remote_spy backend: ok")
 end

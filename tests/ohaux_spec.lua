@@ -64,5 +64,21 @@ assertEqual(aux.searchClosure(nil, "target", 2, { [1] = "wrong" }), nil, "consta
 assertEqual(aux.searchClosure(nil, "Unnamed function", 1, { [1] = "anonymous" }), anonymous, "anonymous match")
 assertEqual(aux.searchClosure(nil, "legacy", 1, { [1] = "legacy" }), legacy, "legacy non-nil fallback")
 assertEqual(aux.searchClosure(nil, "legacy", 99, { [1] = "legacy" }), nil, "legacy nil fallback rejects bad index")
+assertEqual(aux.searchClosure(nil, "target", 0, {}), nil, "zero upvalue index rejected")
+assertEqual(aux.searchClosure(nil, "target", 1.5, {}), nil, "fractional upvalue index rejected")
+assertEqual(aux.searchClosure(nil, "target", 0 / 0, {}), nil, "NaN upvalue index rejected")
+
+_G.getgc = nil
+_G.filtergc = function(kind, options, firstOnly)
+    assertEqual(kind, "function", "documented filter kind")
+    assertEqual(options.IgnoreExecutor, true, "documented executor filter")
+    assertEqual(firstOnly, false, "all matching closures requested")
+    return { false, {}, named }
+end
+local filterOnly = dofile(root .. "ohaux.lua")
+assertEqual(filterOnly.searchClosure(nil, "target", 2, {}), named, "filter-only runtime is supported")
+_G.filtergc = function() error("temporarily unavailable") end
+local failedFilter = dofile(root .. "ohaux.lua")
+assertEqual(failedFilter.searchClosure(nil, "target", 2, {}), nil, "missing GC fallback fails safely")
 
 print("ohaux_spec.lua: ok")
